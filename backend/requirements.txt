@@ -3,4 +3,5 @@ uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 rapidfuzz==3.14.1
 httpx==0.28.1
+playwright==1.63.0
 pytest==8.4.2
