@@ -1,0 +1,9 @@
+{
+  "establishment_name": "ACME ELECTRIC, L.L.C.",
+  "address": "123 MAIN STREET",
+  "city": "Madison",
+  "state": "WI",
+  "inspection_count": 2,
+  "osha_flag": "Y",
+  "source_record_id": "fixture-osha-001"
+}
