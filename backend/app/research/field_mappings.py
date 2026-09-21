@@ -20,7 +20,11 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
         frozenset({"osha"}),
         "OSHA finding flag only; severe-violation and years semantics remain evidence-only pending firm confirmation.",
     ),
-    "wcrb": SourceFieldMapping("wcrb", frozenset({"wc", "wc_date"}), "Workers-compensation fields."),
+    "wcrb": SourceFieldMapping(
+        "wcrb",
+        frozenset({"wc"}),
+        "Confirmed WCRB coverage may support the workers-compensation flag. wc_date ownership is intentionally withheld until the firm's field semantics are confirmed.",
+    ),
     "wcca": SourceFieldMapping(
         "wcca",
         frozenset(),
@@ -34,12 +38,12 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "violation_tracker": SourceFieldMapping(
         "violation_tracker",
         frozenset(),
-        "Useful evidence source, but exact bidder-field ownership must be confirmed before automatic proposals.",
+        "Cross-agency evidence-only source. Findings may be stored and compared, but Violation Tracker intentionally owns no master fields and cannot directly create master-field proposals.",
     ),
     "wisdot": SourceFieldMapping(
         "wisdot",
-        frozenset(),
-        "Exact bidder-field ownership must be confirmed before automatic proposals.",
+        frozenset({"state_federal_debarment"}),
+        "Confirmed current WisDOT debarred/suspended/ineligible records may propose Y only; no-match never emits N. Finals/project-status findings remain evidence-only.",
     ),
     "dol_enforcement": SourceFieldMapping(
         "dol_enforcement",
