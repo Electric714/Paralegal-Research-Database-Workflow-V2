@@ -45,7 +45,6 @@ Write-Host ' Paralegal Research Desk'
 Write-Host '==============================================='
 Write-Host ''
 
-# Bootstrap uv locally. uv itself does not require Python.
 if (-not (Test-Path $UvExe)) {
     Write-Host '[1/7] Preparing local runtime tools...'
     New-Item -ItemType Directory -Force -Path $UvDir | Out-Null
@@ -65,7 +64,6 @@ if (-not (Test-Path $UvExe)) {
     Write-Host '[1/7] Local runtime tools ready.'
 }
 
-# Keep uv-managed Python completely inside this project.
 $env:UV_PYTHON_INSTALL_DIR = $PythonDir
 $env:UV_PYTHON_BIN_DIR = $PythonBinDir
 $env:UV_PYTHON_NO_REGISTRY = '1'
@@ -85,7 +83,6 @@ Write-Host '[3/7] Preparing backend dependencies...'
 & $UvExe pip install --python $VenvPython -r (Join-Path $Backend 'requirements.txt') --quiet
 Assert-Success 'Backend dependency installation'
 
-# Bootstrap a portable Node.js runtime locally instead of requiring a system install.
 $NodeVersion = '22.22.1'
 $NodeArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $NodeFolder = "node-v$NodeVersion-win-$NodeArch"
@@ -130,15 +127,16 @@ if (-not (Test-AppOnline)) {
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
 
-    $Process = Start-Process \
-        -FilePath $VenvPython \
-        -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000') \
-        -WorkingDirectory $Backend \
-        -WindowStyle Hidden \
-        -RedirectStandardOutput $StdoutLog \
-        -RedirectStandardError $StderrLog \
-        -PassThru
-
+    $StartArgs = @{
+        FilePath = $VenvPython
+        ArgumentList = @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000')
+        WorkingDirectory = $Backend
+        WindowStyle = 'Hidden'
+        RedirectStandardOutput = $StdoutLog
+        RedirectStandardError = $StderrLog
+        PassThru = $true
+    }
+    $Process = Start-Process @StartArgs
     Set-Content -Path $PidFile -Value $Process.Id -Encoding ascii
 
     $Deadline = (Get-Date).AddSeconds(45)
@@ -158,7 +156,6 @@ if (-not (Test-AppOnline)) {
     Write-Host 'Application is already running; opening it now.'
 }
 
-# Open the default browser automatically. No URL copying is required.
 Start-Process $Url
 
 Write-Host ''
