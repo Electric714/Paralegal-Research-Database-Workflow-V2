@@ -20,6 +20,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app
       - run: python -c "from app.main import app; print(app.title)"
+      - run: pytest -q
 
   frontend:
     runs-on: ubuntu-latest
