@@ -163,14 +163,14 @@ def test_stale_dataset_never_creates_clean_negative(isolated_db, tmp_path):
     assert result.is_clean_negative is False
 
 
-def test_missing_cache_and_api_key_is_auth_required(isolated_db, tmp_path):
-    source = SamExclusionsSource(api_key="", cache_dir=tmp_path / "empty-cache", today=FIXED_TODAY)
+def test_missing_uploaded_extract_is_source_unavailable(isolated_db, tmp_path):
+    source = SamExclusionsSource(api_key="ignored", cache_dir=tmp_path / "empty-cache", today=FIXED_TODAY)
     source.prepare()
     result = source.search(_acme_context())
 
-    assert result.status == SourceResultStatus.AUTH_REQUIRED
+    assert result.status == SourceResultStatus.SOURCE_UNAVAILABLE
     assert result.completeness_status == CompletenessStatus.UNKNOWN
-    assert "Upload an official SAM Public Exclusions V2 extract" in result.warnings[0]
+    assert "Upload the official SAM Public Exclusions V2 extract" in result.warnings[0]
 
 
 def test_remembered_same_entity_judgment_is_reused(isolated_db, tmp_path):
