@@ -1,211 +1,201 @@
-# Wisconsin Circuit Court Access (WCCA / CCAP) source research
+# Wisconsin Circuit Court Access (WCCA / CCAP)
 
-## Decision
+## Current implementation decision
 
-Do **not** implement WCCA as an unattended scraper against the public Wisconsin Circuit Court Access website.
+WCCA is implemented as an **operator-assisted public research source**, not as an unattended scraper.
 
-Wisconsin Court System documentation shows that the public WCCA site intentionally uses CAPTCHA and fraud-detection controls to prevent automated extraction/screen scraping. The Court System directs organizations that need automated or bulk access toward its subscription WCCA REST service.
+The application prepares a bounded search plan from the approved bidder record, opens the official Wisconsin Circuit Court Access site for the operator, records structured results, and stores the result in the existing evidence/audit pipeline. It does not solve CAPTCHA, bypass anti-automation controls, reverse-engineer hidden endpoints, or treat a blocked/incomplete search as a negative result.
 
-For this project, the recommended implementation is therefore two-stage:
+A future fully automated implementation should use only an official CCAP-supported automated route such as the WCCA REST subscription service after the firm obtains the applicable agreement, credentials, and technical documentation.
 
-1. **Phase 1 — operator-assisted public WCCA research.** The application prepares each contractor search, opens WCCA for the paralegal, records a structured human-confirmed outcome, retains evidence/provenance, and compares that result to the approved master database. The application does not solve or bypass CAPTCHA and does not simulate an unattended user session.
-2. **Phase 2 — official WCCA REST integration if the firm decides the subscription cost is justified.** The REST feed should be normalized/cached locally and matched against only the approved contractors and related-company aliases already in the master database.
+## Terminology
 
-This approach preserves the project's core rule: outside research remains evidence until a human approves a proposed master-data change.
+**CCAP** is Consolidated Court Automation Programs, the Wisconsin court system technology program that supports the statewide circuit-court case-management environment.
 
-## What WCCA / CCAP means
+**WCCA** is Wisconsin Circuit Court Access, the public-facing service for public circuit-court case information.
 
-**CCAP** is the Wisconsin court system's Consolidated Court Automation Programs organization/system. It operates the case-management technology used by Wisconsin circuit courts.
+Public WCCA: `https://wcca.wicourts.gov/`
 
-**WCCA** is Wisconsin Circuit Court Access, the public-facing service that exposes public circuit-court case information maintained through CCAP.
+CCAP overview: `https://www.wicourts.gov/courts/offices/ccap.htm`
 
-Primary public entry point:
+## Post-merge audit: 2026-09-21
 
-`https://wcca.wicourts.gov/`
+The first merged operator-assisted implementation was reviewed against the supplied bidder database, the earlier V1 project, the V2 research/evidence architecture, and Wisconsin Court System documentation.
 
-Wisconsin Court System CCAP overview:
+The audit found one important semantic problem in the first implementation: a complete public WCCA search with no match was being stored as observed `circuit_court=N`. Automatic writes were already disabled, but the comparison itself was still too strong.
 
-`https://www.wicourts.gov/courts/offices/ccap.htm`
+That behavior is now prohibited.
 
-## Official access constraints
+### Why public WCCA no-match cannot mean `circuit_court=N`
 
-The Wisconsin Court System announced CAPTCHA controls for WCCA specifically to prevent automated attempts to extract information and screen-scrape the site. It also states that organizations seeking bulk data should use CCAP's subscription automated service.
+Wisconsin Courts' paid WCCA REST agreement expressly states that WCCA information:
 
-The Court System later added fraud-detection controls intended to identify scraping/denial-of-service behavior. A suspected automated session can therefore be challenged or blocked even if an HTML workflow happens to work during development.
+- includes only records open to public view;
+- excludes confidential, sealed, and redacted information;
+- does not comprise the complete court record;
+- is only a snapshot of accessible CCAP information;
+- may not include older records that predate county CCAP implementation unless they were backloaded; and
+- may fail to return all cases when searching by a field/code that was not historically required.
 
-Consequences for this project:
+Official agreement: `https://www.wicourts.gov/courts/resources/docs/RESTagreementpaid.pdf`
 
-- No CAPTCHA solving or bypassing.
-- No hidden/undocumented endpoint reverse engineering as the production acquisition method.
-- No claim that a blocked public search means the contractor has no cases.
-- No generic browser-bot fallback.
-- Public WCCA should remain a human-driven source unless/until the firm receives an official automated-access route.
+The WCCA Oversight Committee also adopted online display periods for some categories that differ from the underlying record-retention period. A case can therefore cease to display on WCCA while the underlying court record remains subject to a different retention rule.
 
-Official CAPTCHA announcement:
+Official report: `https://www.wicourts.gov/courts/committees/docs/wccafinalreport2017.pdf`
 
-`https://www.wicourts.gov/news/archives/view.jsp?id=715&year=2015`
+Official action plan: `https://www.wicourts.gov/courts/committees/docs/wccaactionplan2017.pdf`
 
-Official paid REST agreement:
+Accordingly, this project uses **positive-only master-field comparison semantics** for public WCCA:
 
-`https://www.wicourts.gov/courts/resources/docs/RESTagreementpaid.pdf`
+- A confirmed WCCA case may support observed `circuit_court=Y` evidence.
+- A complete public no-match is stored only as `wcca_public_search = NO_CURRENTLY_DISPLAYED_MATCH` evidence.
+- A public no-match never creates `circuit_court=N` evidence.
+- A public no-match never contradicts or erases an existing `circuit_court=Y` value.
+- Blocked, ambiguous, partial, and incomplete searches create no negative master-field conclusion.
 
-The currently published paid agreement reviewed for this design is revision 08/2022 and lists a **$12,500 annual subscription fee** for a non-state subscriber. That price should be confirmed directly with CCAP before any budget decision because the agreement revision itself predates this implementation.
+`SourceResultStatus.SUCCESS_NO_MATCH` therefore means the **planned public WCCA search completed with no currently displayed match**. It is a clean negative for that bounded source check, not a statement that no circuit-court record exists.
 
-Technical/subscription contact shown in the agreement:
+## Supplied database contract
 
-`WCCAREST@wicourts.gov`
+The supplied example database contains 24 bidder rows and 30 columns.
 
-## Phase 1 — operator-assisted WCCA workflow
+For the WCCA-related columns:
 
-The application should automate the repetitive parts surrounding WCCA while leaving the actual public-site search to the human operator.
+- `circuit_court`: 9 `Y`, 15 `N`
+- `ccap_show150`: 23 blank, 1 `N`
 
-For each selected bidder:
-
-1. Build a bounded search plan from `contractor_name` plus explicitly stored `related_companies` aliases.
-2. Show the bidder's primary and additional addresses next to the search plan so the operator has identity-corroboration information available.
-3. Open the official WCCA public search page in the user's normal browser.
-4. The operator performs the required statewide business/party-name search for each planned legal name/alias. Any CAPTCHA remains a normal human WCCA interaction.
-5. The operator records the outcome in the application as one of: matched case(s), complete no-match, ambiguous identity, incomplete/partial search, blocked/unavailable, or not checked.
-6. For a positive result, capture only the case information necessary for contractor research: searched name, matched party/business name, case number, county, case type/status when relevant, source/case URL when stable, and concise operator notes explaining the identity match.
-7. Store the result as immutable research evidence with retrieval time, acquisition method, searched aliases, completeness status, identity status, and operator-confirmed case identifiers.
-8. Run the normal comparison/review pipeline. Nothing from WCCA directly edits the approved master record.
-
-Recommended acquisition label:
-
-`operator_assisted_public_wcca`
-
-This is still a meaningful automation gain: the application controls which contractors need research, prepares names/aliases and identity context, records exactly what was checked, compares findings against the prior approved values, and avoids staff maintaining a parallel manual spreadsheet. The one thing it intentionally does not automate is the website interaction that Wisconsin Courts has designed to resist automation.
-
-## Phase 1 evidence model
-
-A positive WCCA evidence record should retain, where available:
-
-- master bidder ID
-- primary contractor name
-- exact alias/name searched
-- matched WCCA party/business name
-- case number
-- county
-- case type and status relevant to the firm's workflow
-- source URL / case URL when stable
-- search/retrieval timestamp
-- identity corroboration used by the operator
-- completeness confirmation for all planned aliases
-- acquisition method (`operator_assisted_public_wcca`)
-- optional operator note
-
-Avoid copying unrelated personal information into the contractor database. The purpose is to establish contractor-related circuit-court evidence, not to reproduce entire court files.
-
-## Phase 1 result semantics
-
-The source must use the existing research status model rather than collapsing every run into Y/N.
-
-A clean no-match is allowed only when every required bidder name/approved alias in the search plan was searched through the intended statewide WCCA scope and the operator explicitly confirms the search completed. If one alias was skipped, WCCA blocked the session, a CAPTCHA/session problem prevented completion, results were truncated, or identity could not be resolved, the result remains partial/blocked/ambiguous rather than becoming `N`.
-
-Examples:
-
-- Complete search + confirmed contractor case: `SUCCESS_WITH_FINDINGS`, identity `CONFIRMED`, completeness `COMPLETE`.
-- Complete search across every planned alias + no candidates: `SUCCESS_NO_MATCH`, completeness `COMPLETE`.
-- Same/similar business name with inadequate corroboration: `AMBIGUOUS_MATCH` or `MANUAL_REVIEW_REQUIRED`.
-- Site/session challenge prevents completion: `BLOCKED` or `PARTIAL_RESULTS`.
-- Search started but aliases/pages remain unchecked: `PARTIAL_RESULTS`.
-
-## Identity matching
-
-Court-party names are especially sensitive to false positives because legal names can be common and a case caption alone may not identify the same contractor.
-
-The operator should begin with exact/canonical contractor and related-company names. When WCCA provides enough business-party information for corroboration, compare it with the master bidder's Wisconsin/location/address context. If the result cannot be tied to the bidder confidently, save it as an ambiguous candidate for review rather than attributing the case automatically.
-
-Remembered `SAME_ENTITY` / `DIFFERENT_ENTITY` judgments can later be reused for stable WCCA case/party identifiers through the existing identity-review system.
-
-## Master-field ownership
-
-The repository currently reserves these fields for WCCA:
-
-- `circuit_court`
-- `ccap_show150`
-
-The field names alone are **not enough to define their business semantics**.
+Both columns are validated by the V2 importer as legacy Y/N/blank fields. Their exact business rules are not defined by the column names alone.
 
 ### `circuit_court`
 
-The likely legacy meaning is whether a matched circuit-court record exists, because the example database uses Y/N values. However, that interpretation must be confirmed with the firm's existing workflow before the adapter is allowed to propose `Y` or `N` automatically.
+The existing Y/N population strongly suggests a legacy boolean decision, but the firm has not yet documented the exact threshold for Y or N. Until that business rule is confirmed, WCCA has no master-field ownership and cannot create a proposed change.
 
-Until confirmed, WCCA findings should be collected as evidence and comparisons should remain review-only.
+The current implementation may nevertheless show **comparison-only positive evidence** when a confirmed WCCA case exists, because a confirmed displayed case directly establishes that WCCA currently contains a matching circuit-court case for the contractor.
 
 ### `ccap_show150`
 
-The current repository, README, field mapping, and supplied example database do not define what `ccap_show150` means. The sample data also does not provide enough examples to infer it safely.
+The supplied database does not contain enough populated values to infer this field safely. The current V2 repository does not define the term. The earlier V1 project recognized aliases such as `ccap show150` / `ccap show 150` but likewise did not define an authoritative rule or implement an authoritative source for the field.
 
-**Do not guess this field. Do not write to it until the firm defines the legacy rule.**
+No official Wisconsin Court System material reviewed for this implementation defines a WCCA field or concept named `ccap_show150`.
 
-Once its meaning is confirmed, document the rule here and add explicit fixtures for positive, negative, ambiguous, and legacy-value cases before enabling proposals.
+Therefore:
 
-## Phase 2 — official WCCA REST adapter
+**Do not infer, calculate, compare, or write `ccap_show150` until the firm explicitly defines what the field means and how it is decided.**
 
-If the firm subscribes to official automated access, replace only the acquisition layer. Keep the same identity/evidence/comparison/review contract used by Phase 1.
+## Information we actually need from WCCA
 
-Recommended design:
+The contractor database does not need a copy of the full court record. The WCCA evidence layer should retain only what is necessary to establish the contractor match, explain the source finding, and support later review.
 
-1. Authenticate through the official subscriber mechanism supplied by CCAP.
-2. Retrieve only data permitted by the subscription and published technical specification.
-3. Persist a raw snapshot or request artifact/hash and retrieval timestamp when practical.
-4. Normalize business-party/case records into an internal WCCA record model.
-5. Build a local searchable index/cache so repeated contractor comparisons do not repeatedly hit WCCA.
-6. Query the local normalized cache only for approved master contractors and approved aliases.
-7. Apply conservative identity matching.
-8. Produce the same `SourceResult` evidence and review proposals as the operator-assisted implementation.
-9. Respect the agreement's security, availability, downstream-update, and redistribution restrictions.
+For a confirmed positive case, the required identifiers are:
 
-The exact REST endpoints and response schema should not be invented from the public website. Implement the HTTP client only after the firm obtains the subscriber technical documentation/credentials or CCAP supplies a supported test route.
+1. **Case number** — required to create confirmed positive case evidence.
+2. **Matched party/business name** — required to show which WCCA party was tied to the approved bidder.
 
-Suggested class boundary after subscription:
+Useful supporting fields, when displayed and relevant, are:
 
-`WccaRestSource(ResearchSource)`
+- county;
+- case type;
+- case status;
+- filing date;
+- disposition;
+- stable case/source URL when available; and
+- concise operator note explaining identity corroboration or limitations.
 
-The normalized parsing/matching layer should be separate from the transport so fixtures can be tested without making live court requests.
+The workbench also retains the exact bidder name/aliases searched, bidder master ID, approved addresses used for corroboration, completion status, identity status, retrieval time, acquisition method, and current approved `circuit_court` / `ccap_show150` values.
 
-## Comparison behavior
+Do not copy unrelated personal information, full filings, transcripts, sensitive identifiers, or unnecessary party details into the contractor database. Wisconsin Courts states that WCCA provides case information such as parties, dates, filings, and orders but does not provide the full case documents; official documents remain with the circuit court.
 
-The approved master remains the baseline. WCCA evidence should be compared to the current approved values only after acquisition and identity classification.
+Redaction/public-information FAQ: `https://www.wicourts.gov/services/attorney/redact/faq.htm`
 
-A new confirmed case can create a review proposal only for a field whose semantics the firm has confirmed. An existing `Y` should not be erased because a later public search was blocked or incomplete. A clean no-match should never erase prior court evidence unless the firm's legacy workflow explicitly defines that behavior and the operator understands why a prior case would no longer appear.
+## Identity rules
 
-Case-level evidence should remain historical even after a master-field decision is approved, so the audit trail can explain what caused the field to change.
+Court-party names require conservative attribution. A case caption or similar name alone is not enough when identity is uncertain.
 
-## Tests required before source completion
+A confirmed positive currently requires:
 
-Phase 1 should have offline tests for:
+- at least one WCCA case record;
+- a case number for each recorded confirmed case;
+- the matched party/business name for each recorded confirmed case; and
+- explicit operator confirmation that the case belongs to the approved contractor.
 
-- primary-name positive case
-- related-company/alias positive case
-- complete no-match
-- skipped alias -> partial, never negative
-- ambiguous same/similar business name
-- operator-blocked/incomplete search
-- retained prior positive when refresh is partial/blocked
-- evidence provenance serialization
-- field-ownership enforcement
-- unresolved `ccap_show150` producing no proposal
+Addresses and locations from the approved bidder record are displayed to the operator as corroborating context. If identity is uncertain, the result remains `AMBIGUOUS_MATCH` / `REVIEW_REQUIRED` and no `circuit_court=Y` comparison evidence is created.
 
-If Phase 2 is implemented, add sanitized REST fixtures covering schema validation, pagination/completeness, authentication/session failures, duplicate case/party records, parser/layout/schema changes, and cache/snapshot behavior.
+Remembered WCCA-specific SAME_ENTITY / DIFFERENT_ENTITY reuse is a possible future enhancement. The current operator-assisted WCCA flow records operator identity confirmation with the evidence but does not yet automatically reuse the common identity-judgment table for WCCA case parties.
 
-## Acceptance gates / unresolved items
+## Search completeness rules
 
-Before `wcca` is marked ready:
+The search plan is created from `contractor_name` plus explicitly stored `related_companies` aliases. Semicolon, pipe, and newline are treated as explicit alias separators; commas remain part of legal names.
 
-1. Confirm with the firm what `circuit_court` means operationally.
-2. Confirm exactly what `ccap_show150` means.
-3. Manually document the current public WCCA search steps used by the paralegals, including whether they search business name only, individual names, counties, case types, date ranges, or all statewide results.
-4. Implement the operator-assisted evidence form and source result handling.
-5. Test with at least one known positive contractor and one expected no-match contractor.
-6. Confirm that a complete human search can be distinguished from a skipped/blocked/partial search.
-7. If full automation is required, obtain the official REST subscription/technical specification before implementing network automation.
+A public WCCA no-match is classified `SUCCESS_NO_MATCH` only when every planned search name was confirmed searched and the operator explicitly confirms completion. If an alias was skipped, the session was interrupted, WCCA blocked access, or the operator cannot determine identity, the result remains partial/blocked/ambiguous.
 
-## Official references
+A confirmed positive case may still be retained when the overall alias search is incomplete. In that situation the result is `PARTIAL_RESULTS`, because the positive case is useful evidence but the full search cannot be represented as complete.
 
-- Wisconsin Court System — CCAP: `https://www.wicourts.gov/courts/offices/ccap.htm`
-- Wisconsin Court System — WCCA public site: `https://wcca.wicourts.gov/`
-- Wisconsin Court System — CAPTCHA/screen-scraping announcement: `https://www.wicourts.gov/news/archives/view.jsp?id=715&year=2015`
-- Wisconsin Court System — paid WCCA REST agreement: `https://www.wicourts.gov/courts/resources/docs/RESTagreementpaid.pdf`
-- Wisconsin Court System — WCCA oversight/policy report: `https://www.wicourts.gov/courts/committees/docs/wccafinalreport2017.pdf`
+## Evidence records
+
+Confirmed positive research stores two layers of evidence:
+
+- `circuit_court = Y` — comparison-only positive master-field observation, never an automatic proposal under the current mapping;
+- `wcca_case = <case number>` — one immutable evidence record per entered case, including the matched party and supporting case metadata.
+
+A complete public no-match stores:
+
+- `wcca_public_search = NO_CURRENTLY_DISPLAYED_MATCH`
+
+It stores **no** `circuit_court=N` evidence.
+
+WCCA's source field mapping remains intentionally empty until the firm's legacy semantics are documented.
+
+## Public-site automation constraints
+
+Wisconsin Courts implemented CAPTCHA and fraud-detection controls to reduce automated extraction/screen scraping from WCCA. This project must not work around those controls.
+
+Official CAPTCHA announcement: `https://www.wicourts.gov/news/archives/view.jsp?id=715&year=2015`
+
+Consequences:
+
+- no CAPTCHA solving or bypass;
+- no generic unattended browser bot against public WCCA;
+- no undocumented endpoint reverse engineering as the production method;
+- no conversion of access challenges into no-match results; and
+- no claim that a temporarily working scraper is a reliable integration.
+
+## Official REST option
+
+The published paid WCCA REST subscription agreement reviewed for this design is revision 08/2022. It describes a REST download interface, data-protection/update duties, and substantial limitations on the data. The revision reviewed lists a $12,500 annual non-state subscription fee; current price and terms must be confirmed directly with CCAP before relying on that amount.
+
+Agreement: `https://www.wicourts.gov/courts/resources/docs/RESTagreementpaid.pdf`
+
+The transport layer should be replaced with an official REST adapter only after the firm obtains supported access and technical documentation. The current evidence, identity, comparison, and review contracts can remain largely unchanged.
+
+## Tests / acceptance gates
+
+The current offline coverage verifies:
+
+- legal-name commas are preserved and aliases are deduplicated;
+- public WCCA is operator-assisted rather than scraped;
+- skipped aliases cannot produce a complete no-match;
+- complete public no-match creates source-level evidence but never `circuit_court=N`;
+- confirmed positive cases require case number and matched party/business name;
+- confirmed cases retain case-level provenance;
+- confirmed positives can be retained while a broader search remains partial;
+- WCCA cannot create a master proposal while its field ownership is disabled; and
+- the packaged application entry point exposes the WCCA API and returns positive-only/no-negative comparison semantics.
+
+WCCA remains **Ongoing**, not Completed, until:
+
+1. The firm defines `circuit_court` operationally.
+2. The firm defines `ccap_show150` operationally.
+3. The paralegals' actual WCCA search procedure is confirmed, including any name variants, date/case-type filters, and statewide/county practices.
+4. At least one known-positive bidder and one expected public no-match bidder are manually tested through the workbench.
+5. The operator confirms the workbench captures enough information without adding unnecessary court data.
+6. Any future field ownership is implemented only after those definitions are written and fixture-tested.
+
+## Primary official references
+
+- WCCA public site: `https://wcca.wicourts.gov/`
+- CCAP overview: `https://www.wicourts.gov/courts/offices/ccap.htm`
+- WCCA CAPTCHA / screen-scraping announcement: `https://www.wicourts.gov/news/archives/view.jsp?id=715&year=2015`
+- WCCA Oversight Committee final report: `https://www.wicourts.gov/courts/committees/docs/wccafinalreport2017.pdf`
+- WCCA Oversight action plan: `https://www.wicourts.gov/courts/committees/docs/wccaactionplan2017.pdf`
+- WCCA paid REST agreement: `https://www.wicourts.gov/courts/resources/docs/RESTagreementpaid.pdf`
+- Wisconsin Courts redaction/public-information FAQ: `https://www.wicourts.gov/services/attorney/redact/faq.htm`
