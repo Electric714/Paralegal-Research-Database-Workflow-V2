@@ -39,7 +39,7 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
 - [ ] **OSHA** — OSHA Establishment Search adapter from PR #5 is merged to `main`; CI passes and the source picker is ready. Final representative real-bidder/end-to-end verification remains before marking the source complete
-- [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
+- [ ] **BBB** — Targeted business-profile research is implemented on `main`; post-merge hardening is in PR #14. Intended owned field: `better_business_bureau_complaints`. Final representative real-bidder/end-to-end verification remains before marking the source complete
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
@@ -108,7 +108,7 @@ These are the primary sites the firm's staff currently checks:
 4. Wisconsin Circuit Court Access / CCAP — https://wcca.wicourts.gov/index.xsl
 5. PACER — https://pacer.login.uscourts.gov/csologin/login.jsf
 6. SAM.gov — https://www.sam.gov/SAM/
-7. Better Business Bureau — http://www.bbb.org/wisconsin
+7. Better Business Bureau — https://www.bbb.org/
 8. Violation Tracker — https://violationtracker.goodjobsfirst.org/
 9. Wisconsin DOT contractor information — http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx
 10. U.S. Department of Labor Enforcement Data — https://data.dol.gov/ (official API: https://apiprod.dol.gov/v4)
