@@ -53,22 +53,46 @@ def _set_run_status(run_id: int, status: str, message: str, *, completed: bool =
 
 
 def execute_research_run(run_id: int) -> dict[str, Any]:
-    run = db.get_run(run_id)
+    db.get_run(run_id)  # validates that the run exists
     tasks = list_tasks(run_id)
-    executable = [task for task in tasks if task["source_key"] in implemented_source_keys()]
-    skipped = [task for task in tasks if task["source_key"] not in implemented_source_keys()]
+    pending = [task for task in tasks if str(task["status"]) == SourceResultStatus.NOT_CHECKED.value]
+    executable = [task for task in pending if task["source_key"] in implemented_source_keys()]
+    skipped = [task for task in pending if task["source_key"] not in implemented_source_keys()]
+    already_processed = [task for task in tasks if str(task["status"]) != SourceResultStatus.NOT_CHECKED.value]
 
     if not executable:
+        if already_processed:
+            run = db.get_run(run_id)
+            return {
+                "run": run,
+                "executed": 0,
+                "skipped": len(skipped),
+                "already_processed": len(already_processed),
+                "proposal_count": 0,
+                "status_counts": {},
+            }
         message = "No selected sources have implemented adapters yet."
         _set_run_status(run_id, "planned", message)
-        return {"run": db.get_run(run_id), "executed": 0, "skipped": len(skipped), "status_counts": {}}
+        return {
+            "run": db.get_run(run_id),
+            "executed": 0,
+            "skipped": len(skipped),
+            "already_processed": 0,
+            "proposal_count": 0,
+            "status_counts": {},
+        }
 
     _set_run_status(run_id, "running", f"Running {len(executable)} implemented research tasks.")
     db.add_diagnostic(
         "INFO",
         "Research run execution started",
         stage="research",
-        details={"run_id": run_id, "task_count": len(executable), "skipped_unimplemented": len(skipped)},
+        details={
+            "run_id": run_id,
+            "task_count": len(executable),
+            "skipped_unimplemented": len(skipped),
+            "already_processed": len(already_processed),
+        },
     )
 
     adapters = {}
@@ -162,12 +186,14 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             "status_counts": dict(status_counts),
             "proposal_count": proposal_count,
             "skipped_unimplemented": len(skipped),
+            "already_processed": len(already_processed),
         },
     )
     return {
         "run": db.get_run(run_id),
         "executed": sum(status_counts.values()),
         "skipped": len(skipped),
+        "already_processed": len(already_processed),
         "proposal_count": proposal_count,
         "status_counts": dict(status_counts),
     }
