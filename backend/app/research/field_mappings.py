@@ -20,7 +20,11 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
         frozenset({"osha"}),
         "OSHA finding flag only; severe-violation and years semantics remain evidence-only pending firm confirmation.",
     ),
-    "wcrb": SourceFieldMapping("wcrb", frozenset({"wc", "wc_date"}), "Workers-compensation fields."),
+    "wcrb": SourceFieldMapping(
+        "wcrb",
+        frozenset({"wc"}),
+        "Confirmed WCRB coverage may support the workers-compensation flag. wc_date ownership is intentionally withheld until the firm's field semantics are confirmed.",
+    ),
     "wcca": SourceFieldMapping(
         "wcca",
         frozenset({"circuit_court", "ccap_show150"}),
