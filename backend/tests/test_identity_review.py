@@ -125,7 +125,18 @@ def test_ambiguous_sam_match_can_be_resolved_without_mutating_old_evidence(isola
     assert snapshots[0]["identity_status"] == "REVIEW_REQUIRED"
     assert snapshots[1]["identity_status"] == "CONFIRMED"
     assert judgment["judgment"] == "SAME_ENTITY"
-    assert list_identity_review_items() == []
+
+    # Confirming one SAM record does not silently reject other plausible records.
+    # The chosen record disappears from identity review; any other unresolved record
+    # remains visible for an explicit human decision.
+    remaining = list_identity_review_items()
+    remaining_ids = {
+        candidate["source_record_id"]
+        for item in remaining
+        for candidate in item["candidates"]
+    }
+    assert "100000002" not in remaining_ids
+    assert "100000003" in remaining_ids
 
     tasks = list_tasks(run["id"])
     assert tasks[0]["status"] == SourceResultStatus.SUCCESS_WITH_FINDINGS.value
