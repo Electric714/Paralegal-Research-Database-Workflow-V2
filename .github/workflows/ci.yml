@@ -35,3 +35,23 @@ jobs:
           cache-dependency-path: frontend/package.json
       - run: npm install
       - run: npm run build
+
+  windows-launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell launch scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($script in @('scripts/start.ps1', 'scripts/stop.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "Syntax errors in $script" -ForegroundColor Red
+              $errors | ForEach-Object { Write-Host $_.Message -ForegroundColor Red }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
