@@ -63,7 +63,6 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_bidders_name ON bidders(contractor_name);
             CREATE INDEX IF NOT EXISTS idx_bidders_external_id ON bidders(external_id);
-            CREATE INDEX IF NOT EXISTS idx_bidders_active ON bidders(active, contractor_name);
             CREATE TABLE IF NOT EXISTS research_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL,
@@ -104,7 +103,7 @@ def init_db() -> None:
         bidder_columns = {row["name"] for row in conn.execute("PRAGMA table_info(bidders)").fetchall()}
         if "active" not in bidder_columns:
             conn.execute("ALTER TABLE bidders ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_bidders_active ON bidders(active, contractor_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bidders_active ON bidders(active, contractor_name)")
 
         apply_research_schema(conn)
 
@@ -118,34 +117,67 @@ def add_diagnostic(severity: str, message: str, *, source_key: str | None = None
 
 
 def replace_master_database(filename: str, columns: list[str], rows: list[dict[str, str]], snapshot_path: str) -> int:
+    now = utcnow()
     with connect() as conn:
         conn.execute("UPDATE imports SET active = 0 WHERE active = 1")
         cur = conn.execute(
             "INSERT INTO imports(filename, imported_at, row_count, columns_json, snapshot_path, active) VALUES (?, ?, ?, ?, ?, 1)",
-            (filename, utcnow(), len(rows), json.dumps(columns), snapshot_path),
+            (filename, now, len(rows), json.dumps(columns), snapshot_path),
         )
         import_id = int(cur.lastrowid)
 
-        # Historical bidders stay in place so old evidence, judgments, and revisions
-        # remain auditable. Only the newest import is active for current research.
-        conn.execute("UPDATE bidders SET active = 0 WHERE active = 1")
-        conn.execute("DELETE FROM review_proposals")
-        conn.executemany(
-            """
-            INSERT INTO bidders(
-                import_id, external_id, contractor_name, related_companies, city, state, row_json, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            [(
-                import_id,
-                row.get("id", ""),
-                row.get("contractor_name", ""),
-                row.get("related_companies", ""),
-                row.get("city", ""),
-                row.get("state", ""),
-                json.dumps(row, ensure_ascii=False),
-            ) for row in rows],
+        # Pending proposals belong to the previous approved master values. Preserve
+        # them for audit, but do not let them be approved against a newly imported master.
+        conn.execute(
+            "UPDATE proposed_changes SET status='superseded', reviewed_at=? WHERE status='pending'",
+            (now,),
         )
+        conn.execute("DELETE FROM review_proposals")
+
+        # Keep one stable internal bidder identity for a firm's external bidder ID.
+        # This allows evidence and identity judgments to survive future CSV imports.
+        conn.execute("UPDATE bidders SET active = 0 WHERE active = 1")
+        for row in rows:
+            external_id = row.get("id", "")
+            existing = conn.execute(
+                "SELECT id FROM bidders WHERE external_id = ? ORDER BY active DESC, id DESC LIMIT 1",
+                (external_id,),
+            ).fetchone()
+            payload = json.dumps(row, ensure_ascii=False)
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE bidders
+                    SET import_id=?, contractor_name=?, related_companies=?, city=?, state=?, row_json=?, active=1
+                    WHERE id=?
+                    """,
+                    (
+                        import_id,
+                        row.get("contractor_name", ""),
+                        row.get("related_companies", ""),
+                        row.get("city", ""),
+                        row.get("state", ""),
+                        payload,
+                        int(existing["id"]),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO bidders(
+                        import_id, external_id, contractor_name, related_companies, city, state, row_json, active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        import_id,
+                        external_id,
+                        row.get("contractor_name", ""),
+                        row.get("related_companies", ""),
+                        row.get("city", ""),
+                        row.get("state", ""),
+                        payload,
+                    ),
+                )
         return import_id
 
 
