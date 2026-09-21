@@ -48,14 +48,14 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **Wisconsin DOT Contractor Information** — automatic WisDOT/HCCI official-PDF refresh, immutable caching, debarment/vendor matching, and Finals Status evidence are implemented in PR #19 (`feature/wisdot-auto-refresh-implementation`). Confirmed debarred/suspended/ineligible matches may propose `state_federal_debarment = Y`; WisDOT no-match never proposes `N`; Finals Status remains evidence-only. Final representative real-bidder/end-to-end verification remains before marking complete.
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
-- [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
-
-### To Do
-
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
 - [ ] **Research Run Summary Dashboard** — show completed, no-match, ambiguous, partial, blocked, and failed counts together
 - [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
+- [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
+
+### To Do
+
 - [ ] **Final Clean-Machine End-to-End Test** — install → import → research → review → approve/dismiss → export
 
 ### Source Completion Gates
