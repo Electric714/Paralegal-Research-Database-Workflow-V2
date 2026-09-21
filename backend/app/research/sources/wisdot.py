@@ -65,14 +65,7 @@ class DebarmentRecord:
     @property
     def record_id(self) -> str:
         base = "|".join(
-            [
-                self.name,
-                self.address_1,
-                self.effective_date,
-                self.termination_date,
-                self.action,
-                self.acting_agency,
-            ]
+            [self.name, self.address_1, self.effective_date, self.termination_date, self.action, self.acting_agency]
         )
         return "wisdot-debar-" + hashlib.sha256(base.encode("utf-8")).hexdigest()[:20]
 
@@ -127,20 +120,23 @@ class Candidate:
     city_score: float
     state_score: float
     matched_alias: str
+    matched_location: str
     auto_confirmable: bool
+    remembered_judgment: str | None = None
 
     def as_dict(self) -> dict:
-        record = self.record.as_dict()
         return {
             "record_id": self.record.record_id,
-            "record": record,
+            "record": self.record.as_dict(),
             "score": self.score,
             "name_score": self.name_score,
             "address_score": self.address_score,
             "city_score": self.city_score,
             "state_score": self.state_score,
             "matched_alias": self.matched_alias,
+            "matched_location": self.matched_location,
             "auto_confirmable": self.auto_confirmable,
+            "remembered_judgment": self.remembered_judgment,
         }
 
 
@@ -204,10 +200,8 @@ def _read_latest_cached(key: str, cache_dir: Path, extractor: Callable[[bytes], 
         text_path = cache_dir / key / f"{sha}.txt"
         if not raw_path.exists():
             return None
-        if text_path.exists():
-            text = text_path.read_text(encoding="utf-8")
-        else:
-            text = extractor(raw_path.read_bytes())
+        text = text_path.read_text(encoding="utf-8") if text_path.exists() else extractor(raw_path.read_bytes())
+        if not text_path.exists():
             text_path.write_text(text, encoding="utf-8")
         _validate_layout(key, text)
         return CachedPdf(
@@ -238,51 +232,43 @@ def _store_pdf(
     text_path = directory / f"{sha}.txt"
     if not raw_path.exists():
         raw_path.write_bytes(data)
-    if text_path.exists():
-        text = text_path.read_text(encoding="utf-8")
-    else:
-        text = extractor(data)
+    text = text_path.read_text(encoding="utf-8") if text_path.exists() else extractor(data)
+    if not text_path.exists():
         text_path.write_text(text, encoding="utf-8")
     _validate_layout(key, text)
     retrieved_at = datetime.now(timezone.utc).isoformat()
     (directory / "latest.json").write_text(
-        json.dumps(
-            {"sha256": sha, "url": url, "retrieved_at": retrieved_at},
-            sort_keys=True,
-            indent=2,
-        ),
+        json.dumps({"sha256": sha, "url": url, "retrieved_at": retrieved_at}, sort_keys=True, indent=2),
         encoding="utf-8",
     )
-    return CachedPdf(
-        key=key,
-        url=url,
-        path=raw_path,
-        sha256=sha,
-        text=text,
-        retrieved_at=retrieved_at,
-        from_cache=False,
-    )
+    return CachedPdf(key, url, raw_path, sha, text, retrieved_at, False)
 
 
 def _location_parts(value: str) -> tuple[str, str, str]:
-    match = re.search(r"(?P<city>[A-Za-z .'-]+),?\s+(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)\b", value)
-    if not match:
+    city_pattern = r"[A-Za-z][A-Za-z.'-]*(?: [A-Za-z][A-Za-z.'-]*)*"
+    matches = list(
+        re.finditer(
+            rf"(?P<city>{city_pattern}),?\s+(?P<state>[A-Z]{{2}})\s+(?P<zip>\d{{5}}(?:-\d{{4}})?)\b",
+            value,
+        )
+    )
+    if not matches:
         return "", "", ""
+    match = matches[-1]
     return match.group("city").strip(" ,"), match.group("state"), match.group("zip")
 
 
 def parse_debarment_text(text: str) -> list[DebarmentRecord]:
     lines = [re.sub(r"\s+$", "", line) for line in text.splitlines()]
-    records: list[DebarmentRecord] = []
     row_re = re.compile(
         r"(?P<effective>\d{1,2}/\d{1,2}/\d{2,4})\s+"
         r"(?P<termination>\d{1,2}/\d{1,2}/\d{2,4}|Indefinite)\s+"
         r"(?P<action>Debarment|Suspended|Ineligible)\s+"
-        r"(?P<area>\S+)\s*"
-        r"(?P<agency>WisDOT|WisDWD|FHWA|GSA|AF|[A-Z][A-Za-z0-9&./-]*)?\s*"
+        r"(?P<area>\S+)\s*(?P<agency>WisDOT|WisDWD|FHWA|GSA|AF|[A-Z][A-Za-z0-9&./-]*)?\s*"
         r"(?P<cause>[0-9, ]*)$",
         re.IGNORECASE,
     )
+    records: list[DebarmentRecord] = []
 
     for index, line in enumerate(lines):
         match = row_re.search(line.strip())
@@ -294,48 +280,42 @@ def parse_debarment_text(text: str) -> list[DebarmentRecord]:
             context.insert(0, lines[index - 1])
         if index > 1:
             context.insert(0, lines[index - 2])
-
         chunks = [chunk.strip() for chunk in re.split(r"\s{2,}", prefix) if chunk.strip()]
         name = chunks[0] if chunks else ""
         address = chunks[1] if len(chunks) > 1 else ""
-
         if not name:
             for prior in reversed(context[:-1]):
                 candidate = prior.strip()
                 if candidate and not any(
                     marker in candidate.casefold()
-                    for marker in ("name of contractor", "prepared and issued", "contractors", "cause code")
+                    for marker in ("name of contractor", "prepared and issued", "cause code", "contractors")
                 ):
                     name = candidate
                     break
-
-        combined_context = " ".join(item.strip() for item in context if item.strip())
-        city, state, zip_code = _location_parts(combined_context)
+        combined = " ".join(item.strip() for item in context if item.strip())
+        city, state, zip_code = _location_parts(combined)
         if not address:
             for prior in reversed(context[:-1]):
                 candidate = prior.strip()
                 if re.search(r"\d", candidate) and candidate != name:
                     address = candidate
                     break
-
-        if not name:
-            continue
-        records.append(
-            DebarmentRecord(
-                name=name,
-                address_1=address,
-                city=city,
-                state=state,
-                zip_code=zip_code,
-                effective_date=match.group("effective"),
-                termination_date=match.group("termination"),
-                action=match.group("action").title(),
-                restricted_area=match.group("area"),
-                acting_agency=(match.group("agency") or "").strip(),
-                cause_code=(match.group("cause") or "").strip(),
+        if name:
+            records.append(
+                DebarmentRecord(
+                    name=name,
+                    address_1=address,
+                    city=city,
+                    state=state,
+                    zip_code=zip_code,
+                    effective_date=match.group("effective"),
+                    termination_date=match.group("termination"),
+                    action=match.group("action").title(),
+                    restricted_area=match.group("area"),
+                    acting_agency=(match.group("agency") or "").strip(),
+                    cause_code=(match.group("cause") or "").strip(),
+                )
             )
-        )
-
     if not records:
         raise WisdotDatasetError(
             "WisDOT debarment PDF was recognized but no contractor rows could be parsed.",
@@ -346,27 +326,23 @@ def parse_debarment_text(text: str) -> list[DebarmentRecord]:
 
 def parse_vendor_text(text: str, *, dataset_key: str) -> list[VendorRecord]:
     lines = [line.rstrip() for line in text.splitlines()]
-    starts: list[tuple[int, str, str]] = []
     start_re = re.compile(r"^\s*(?P<vendor>[A-Z][A-Z0-9]{2,7})\s{2,}(?P<rest>.+)$")
-    phone_re = re.compile(r"\s{2,}(?:\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}|\d{1,2}/\d{1,2}/\d{2,4})")
-
+    phone_or_date = re.compile(r"\s{2,}(?:\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}|\d{1,2}/\d{1,2}/\d{2,4})")
+    starts: list[tuple[int, str, str]] = []
     for index, line in enumerate(lines):
         match = start_re.match(line)
         if not match:
             continue
-        rest = match.group("rest").strip()
-        name = phone_re.split(rest, maxsplit=1)[0].strip()
-        if not name or "Vendor Name & Address" in name:
-            continue
-        starts.append((index, match.group("vendor"), name))
+        name = phone_or_date.split(match.group("rest").strip(), maxsplit=1)[0].strip()
+        if name and "Vendor Name & Address" not in name:
+            starts.append((index, match.group("vendor"), name))
 
     records: list[VendorRecord] = []
     for pos, (start, vendor_id, name) in enumerate(starts):
         end = starts[pos + 1][0] if pos + 1 < len(starts) else min(len(lines), start + 12)
-        block = lines[start + 1 : min(end, start + 10)]
         address = ""
         city = state = zip_code = ""
-        for line in block:
+        for line in lines[start + 1 : min(end, start + 10)]:
             cleaned = re.sub(r"^\s*(Mail|Ship)\s+", "", line).strip()
             if not cleaned or "@" in cleaned or "Rated" in cleaned or "NO FAX" in cleaned:
                 continue
@@ -375,21 +351,10 @@ def parse_vendor_text(text: str, *, dataset_key: str) -> list[VendorRecord]:
                 city, state, zip_code = loc_city, loc_state, loc_zip
                 continue
             if not address and re.search(r"\d", cleaned):
-                cleaned = phone_re.split(cleaned, maxsplit=1)[0].strip()
+                cleaned = phone_or_date.split(cleaned, maxsplit=1)[0].strip()
                 if cleaned:
                     address = cleaned
-        records.append(
-            VendorRecord(
-                vendor_id=vendor_id,
-                name=name,
-                address_1=address,
-                city=city,
-                state=state,
-                zip_code=zip_code,
-                dataset_key=dataset_key,
-            )
-        )
-
+        records.append(VendorRecord(vendor_id, name, address, city, state, zip_code, dataset_key))
     if not records:
         raise WisdotDatasetError(
             f"WisDOT {dataset_key} PDF was recognized but no vendor rows could be parsed.",
@@ -420,47 +385,77 @@ def _zip5(value: str) -> str:
     return digits[:5] if len(digits) >= 5 else ""
 
 
-def _candidate_for(
-    contractor: ContractorContext,
-    record: DebarmentRecord | VendorRecord,
-) -> Candidate | None:
-    aliases = _aliases(contractor)
+def _master_locations(contractor: ContractorContext) -> list[tuple[str, str, str, str, str]]:
+    locations = [
+        ("primary", contractor.address_1, contractor.city, contractor.state, contractor.zip),
+        (
+            "additional",
+            contractor.additional_address,
+            contractor.additional_address_city,
+            contractor.additional_address_state,
+            contractor.additional_address_zip,
+        ),
+    ]
+    return [location for location in locations if any(location[1:])]
+
+
+def _remembered_judgment(bidder_id: int, record_id: str) -> str | None:
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT judgment FROM identity_judgments WHERE bidder_id=? AND source_key='wisdot' AND source_record_id=?",
+                (bidder_id, record_id),
+            ).fetchone()
+        return str(row["judgment"]) if row else None
+    except Exception:
+        return None
+
+
+def _candidate_for(contractor: ContractorContext, record: DebarmentRecord | VendorRecord) -> Candidate | None:
     best: Candidate | None = None
-    for alias in aliases:
-        scored = score_candidate(
-            master_name=alias,
-            candidate_name=record.name,
-            master_address=contractor.address_1,
-            candidate_address=record.address_1,
-            master_city=contractor.city,
-            candidate_city=record.city,
-            master_state=contractor.state,
-            candidate_state=record.state,
-        )
-        exact_name = normalize_company_name(alias) == normalize_company_name(record.name)
-        zip_match = bool(_zip5(contractor.zip) and _zip5(contractor.zip) == _zip5(record.zip_code))
-        city_state_match = bool(
-            normalize_text(contractor.city)
-            and normalize_text(contractor.city) == normalize_text(record.city)
-            and normalize_text(contractor.state)
-            and normalize_text(contractor.state) == normalize_text(record.state)
-        )
-        address_match = bool(contractor.address_1 and record.address_1 and scored.address_score >= 0.82)
-        auto_confirmable = exact_name and (address_match or zip_match or city_state_match)
-        if scored.name_score < 0.78:
-            continue
-        candidate = Candidate(
-            record=record,
-            score=scored.score,
-            name_score=scored.name_score,
-            address_score=scored.address_score,
-            city_score=scored.city_score,
-            state_score=scored.state_score,
-            matched_alias=alias,
-            auto_confirmable=auto_confirmable,
-        )
-        if best is None or candidate.score > best.score:
-            best = candidate
+    locations = _master_locations(contractor) or [("none", "", "", "", "")]
+    remembered = _remembered_judgment(contractor.internal_id, record.record_id)
+
+    for alias in _aliases(contractor):
+        for label, address, city, state, zip_code in locations:
+            scored = score_candidate(
+                master_name=alias,
+                candidate_name=record.name,
+                master_address=address,
+                candidate_address=record.address_1,
+                master_city=city,
+                candidate_city=record.city,
+                master_state=state,
+                candidate_state=record.state,
+            )
+            if scored.name_score < 0.78:
+                continue
+            exact_name = normalize_company_name(alias) == normalize_company_name(record.name)
+            zip_match = bool(_zip5(zip_code) and _zip5(zip_code) == _zip5(record.zip_code))
+            city_state_match = bool(
+                normalize_text(city)
+                and normalize_text(city) == normalize_text(record.city)
+                and normalize_text(state)
+                and normalize_text(state) == normalize_text(record.state)
+            )
+            address_match = bool(address and record.address_1 and scored.address_score >= 0.82)
+            auto = remembered == "SAME_ENTITY" or (exact_name and (address_match or zip_match or city_state_match))
+            if remembered == "DIFFERENT_ENTITY":
+                auto = False
+            candidate = Candidate(
+                record=record,
+                score=scored.score,
+                name_score=scored.name_score,
+                address_score=scored.address_score,
+                city_score=scored.city_score,
+                state_score=scored.state_score,
+                matched_alias=alias,
+                matched_location=label,
+                auto_confirmable=auto,
+                remembered_judgment=remembered,
+            )
+            if best is None or candidate.score > best.score:
+                best = candidate
     return best
 
 
@@ -470,29 +465,22 @@ def _finals_findings(text: str, contractor: ContractorContext) -> list[dict]:
     lines = text.splitlines()
     findings: list[dict] = []
     seen: set[tuple[str, str]] = set()
-
     for index, line in enumerate(lines):
         normalized_line = normalize_company_name(line)
-        matched_alias = ""
-        for alias, normalized in aliases:
-            if normalized and normalized in normalized_line:
-                matched_alias = alias
-                break
+        matched_alias = next((alias for alias, normalized in aliases if normalized in normalized_line), "")
         if not matched_alias:
             continue
-
-        start = max(0, index - 4)
-        end = min(len(lines), index + 12)
-        context_lines = [item.strip() for item in lines[start:end] if item.strip()]
-        context = " ".join(context_lines)
+        context = " ".join(
+            item.strip() for item in lines[max(0, index - 4) : min(len(lines), index + 12)] if item.strip()
+        )
         contract = re.search(r"\b\d{11}\b", context)
         project = re.search(r"\b\d{4}-\d{2}-\d{2}\b", context)
         remarks = re.search(r"Remarks:\s*(.*?)(?:Code Description|$)", context, flags=re.IGNORECASE)
         codes = sorted(set(re.findall(r"\b(?:CNQI|PLFC|WCLC|SFST|DNRP|OTHR)\b", context)))
-        record_key = (contract.group(0) if contract else "", matched_alias)
-        if record_key in seen:
+        key = (contract.group(0) if contract else context[:80], matched_alias)
+        if key in seen:
             continue
-        seen.add(record_key)
+        seen.add(key)
         findings.append(
             {
                 "matched_alias": matched_alias,
@@ -509,8 +497,8 @@ def _finals_findings(text: str, contractor: ContractorContext) -> list[dict]:
 class WisdotContractorSource(ResearchSource):
     source_key = "wisdot"
     display_name = "Wisconsin DOT Contractor Information"
-    adapter_version = "1.0.0"
-    parser_version = "1.0.0"
+    adapter_version = "1.1.0"
+    parser_version = "1.1.0"
 
     def __init__(
         self,
@@ -547,14 +535,11 @@ class WisdotContractorSource(ResearchSource):
         try:
             response = self.client.get(url)
         except httpx.TimeoutException as exc:
-            raise WisdotDatasetError(
-                f"WisDOT {key} download timed out.", status=SourceResultStatus.TIMEOUT
-            ) from exc
+            raise WisdotDatasetError(f"WisDOT {key} download timed out.", status=SourceResultStatus.TIMEOUT) from exc
         except httpx.HTTPError as exc:
             raise WisdotDatasetError(
                 f"WisDOT {key} download failed: {exc}", status=SourceResultStatus.SOURCE_UNAVAILABLE
             ) from exc
-
         if response.status_code in {403, 429}:
             raise WisdotDatasetError(
                 f"WisDOT {key} download was blocked with HTTP {response.status_code}.",
@@ -570,13 +555,11 @@ class WisdotContractorSource(ResearchSource):
         data = response.content
         if len(data) > MAX_PDF_BYTES:
             raise WisdotDatasetError(
-                f"WisDOT {key} PDF exceeds the configured size limit.",
-                status=SourceResultStatus.DATASET_MALFORMED,
+                f"WisDOT {key} PDF exceeds the configured size limit.", status=SourceResultStatus.DATASET_MALFORMED
             )
         if not data.startswith(b"%PDF"):
             raise WisdotDatasetError(
-                f"WisDOT {key} response is not a PDF.",
-                status=SourceResultStatus.DATASET_MALFORMED,
+                f"WisDOT {key} response is not a PDF.", status=SourceResultStatus.DATASET_MALFORMED
             )
         return _store_pdf(
             key=key,
@@ -586,6 +569,19 @@ class WisdotContractorSource(ResearchSource):
             extractor=self.pdf_text_extractor,
         )
 
+    def _parse_dataset(self, key: str, dataset: CachedPdf) -> None:
+        try:
+            if key == "debarment":
+                self.debarment_records = parse_debarment_text(dataset.text)
+            elif key == "all_contractors":
+                self.vendor_records = parse_vendor_text(dataset.text, dataset_key=key)
+            elif key == "prequalified":
+                self.prequalified_records = parse_vendor_text(dataset.text, dataset_key=key)
+            elif key == "finals_status":
+                self.finals_text = dataset.text
+        except WisdotDatasetError as exc:
+            self.prepare_errors[key] = exc
+
     def prepare(self) -> None:
         self.datasets = {}
         self.prepare_warnings = []
@@ -594,7 +590,6 @@ class WisdotContractorSource(ResearchSource):
         self.vendor_records = []
         self.prequalified_records = []
         self.finals_text = ""
-
         for key, url in WISDOT_DATASETS.items():
             try:
                 dataset = self._download_dataset(key, url)
@@ -604,28 +599,10 @@ class WisdotContractorSource(ResearchSource):
                     self.prepare_errors[key] = exc
                     continue
                 dataset = cached
-                self.prepare_warnings.append(
-                    f"WisDOT {key} live refresh failed; using the last cached artifact."
-                )
+                self.prepare_warnings.append(f"WisDOT {key} live refresh failed; using the last cached artifact.")
                 self.prepare_errors[key] = exc
             self.datasets[key] = dataset
-
-        try:
-            if "debarment" in self.datasets:
-                self.debarment_records = parse_debarment_text(self.datasets["debarment"].text)
-            if "all_contractors" in self.datasets:
-                self.vendor_records = parse_vendor_text(
-                    self.datasets["all_contractors"].text, dataset_key="all_contractors"
-                )
-            if "prequalified" in self.datasets:
-                self.prequalified_records = parse_vendor_text(
-                    self.datasets["prequalified"].text, dataset_key="prequalified"
-                )
-            if "finals_status" in self.datasets:
-                self.finals_text = self.datasets["finals_status"].text
-        except WisdotDatasetError as exc:
-            key = "parser"
-            self.prepare_errors[key] = exc
+            self._parse_dataset(key, dataset)
 
     def _artifacts(self) -> list[RawArtifact]:
         return [
@@ -647,7 +624,6 @@ class WisdotContractorSource(ResearchSource):
         warnings = list(self.prepare_warnings)
         artifacts = self._artifacts()
         acquisition_method = "automatic_cached_pdf"
-
         if not self.datasets:
             statuses = {error.status for error in self.prepare_errors.values()}
             status = SourceResultStatus.SOURCE_UNAVAILABLE
@@ -673,29 +649,29 @@ class WisdotContractorSource(ResearchSource):
                 )
             )
 
-        debar_candidates = [
+        all_debar = [
             candidate
             for record in self.debarment_records
             if (candidate := _candidate_for(contractor, record)) is not None
         ]
-        debar_candidates.sort(key=lambda item: item.score, reverse=True)
-        confirmed_debar = [candidate for candidate in debar_candidates if candidate.auto_confirmable]
+        all_debar.sort(key=lambda item: item.score, reverse=True)
+        debar_candidates = [item for item in all_debar if item.remembered_judgment != "DIFFERENT_ENTITY"]
+        confirmed_debar = [item for item in debar_candidates if item.auto_confirmable]
 
-        vendor_candidates = [
+        all_vendor = [
             candidate
             for record in self.vendor_records + self.prequalified_records
             if (candidate := _candidate_for(contractor, record)) is not None
         ]
-        vendor_candidates.sort(key=lambda item: item.score, reverse=True)
-        confirmed_vendor = [candidate for candidate in vendor_candidates if candidate.auto_confirmable]
+        all_vendor.sort(key=lambda item: item.score, reverse=True)
+        vendor_candidates = [item for item in all_vendor if item.remembered_judgment != "DIFFERENT_ENTITY"]
+        confirmed_vendor = [item for item in vendor_candidates if item.auto_confirmable]
         finals = _finals_findings(self.finals_text, contractor) if self.finals_text else []
 
         complete = not self.prepare_errors and len(self.datasets) == len(WISDOT_DATASETS)
         completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
         if self.prepare_errors:
-            warnings.extend(
-                f"{key}: {error}" for key, error in sorted(self.prepare_errors.items())
-            )
+            warnings.extend(f"{key}: {error}" for key, error in sorted(self.prepare_errors.items()))
 
         evidence: list[EvidenceRecord] = []
         identity_status = IdentityStatus.NOT_EVALUATED
@@ -715,7 +691,7 @@ class WisdotContractorSource(ResearchSource):
                     source_url=WISDOT_DATASETS["debarment"],
                     details={
                         "match": best.as_dict(),
-                        "all_debarment_candidates": [item.as_dict() for item in debar_candidates[:10]],
+                        "all_debarment_candidates": [item.as_dict() for item in all_debar[:10]],
                     },
                 )
             )
@@ -737,10 +713,7 @@ class WisdotContractorSource(ResearchSource):
                     observed_value=best_vendor.record.vendor_id,
                     source_record_id=best_vendor.record.record_id,
                     source_url=WISDOT_DATASETS[best_vendor.record.dataset_key],
-                    details={
-                        "match": best_vendor.as_dict(),
-                        "candidate_count": len(vendor_candidates),
-                    },
+                    details={"match": best_vendor.as_dict(), "candidate_count": len(vendor_candidates)},
                 )
             )
         elif vendor_candidates and identity_status == IdentityStatus.NOT_EVALUATED:
@@ -762,7 +735,6 @@ class WisdotContractorSource(ResearchSource):
 
         ambiguous = bool(debar_candidates and not confirmed_debar)
         has_findings = bool(evidence or debar_candidates or vendor_candidates or finals)
-
         if ambiguous:
             status = SourceResultStatus.AMBIGUOUS_MATCH
         elif not complete:
@@ -771,21 +743,6 @@ class WisdotContractorSource(ResearchSource):
             status = SourceResultStatus.SUCCESS_WITH_FINDINGS
         else:
             status = SourceResultStatus.SUCCESS_NO_MATCH
-
-        normalized_payload = {
-            "debarment_candidates": [item.as_dict() for item in debar_candidates[:20]],
-            "vendor_candidates": [item.as_dict() for item in vendor_candidates[:20]],
-            "finals_findings": finals,
-            "dataset_status": {
-                key: {
-                    "sha256": dataset.sha256,
-                    "retrieved_at": dataset.retrieved_at,
-                    "from_cache": dataset.from_cache,
-                }
-                for key, dataset in sorted(self.datasets.items())
-            },
-            "missing_or_stale_datasets": sorted(self.prepare_errors),
-        }
 
         return self.validate_result(
             SourceResult(
@@ -800,7 +757,20 @@ class WisdotContractorSource(ResearchSource):
                 evidence=evidence,
                 warnings=warnings,
                 artifacts=artifacts,
-                normalized_payload=normalized_payload,
+                normalized_payload={
+                    "debarment_candidates": [item.as_dict() for item in all_debar[:20]],
+                    "vendor_candidates": [item.as_dict() for item in all_vendor[:20]],
+                    "finals_findings": finals,
+                    "dataset_status": {
+                        key: {
+                            "sha256": dataset.sha256,
+                            "retrieved_at": dataset.retrieved_at,
+                            "from_cache": dataset.from_cache,
+                        }
+                        for key, dataset in sorted(self.datasets.items())
+                    },
+                    "missing_or_stale_datasets": sorted(self.prepare_errors),
+                },
                 source_record_id=source_record_id,
                 source_url=WISDOT_HOME_URL,
                 acquisition_method=acquisition_method,
