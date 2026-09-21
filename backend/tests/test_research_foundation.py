@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -212,3 +213,52 @@ def test_reimport_keeps_historical_bidder_for_evidence(isolated_db):
             "SELECT COUNT(*) FROM evidence_snapshots WHERE bidder_id = ?", (old_id,)
         ).fetchone()[0]
     assert evidence_count == 1
+
+
+def test_same_external_id_reuses_internal_identity(isolated_db):
+    db.replace_master_database(
+        "first.csv",
+        ["id", "contractor_name", "city"],
+        [{"id": "1220", "contractor_name": "Acme LLC", "city": "Madison"}],
+        str(isolated_db / "first.csv"),
+    )
+    first_internal_id = db.active_bidder_ids()[0]
+
+    db.replace_master_database(
+        "second.csv",
+        ["id", "contractor_name", "city"],
+        [{"id": "1220", "contractor_name": "ACME LLC", "city": "Milwaukee"}],
+        str(isolated_db / "second.csv"),
+    )
+    assert db.active_bidder_ids() == [first_internal_id]
+    assert db.get_bidder(first_internal_id)["city"] == "Milwaukee"
+
+
+def test_evidence_snapshot_is_immutable(isolated_db):
+    db.replace_master_database(
+        "master.csv",
+        ["id", "contractor_name"],
+        [{"id": "9", "contractor_name": "Immutable Co"}],
+        str(isolated_db / "master.csv"),
+    )
+    bidder_id = db.active_bidder_ids()[0]
+    run = db.create_run(None, ["osha"], 1)
+    task_id = list_tasks(run["id"])[0]["id"]
+    persisted = persist_source_result(
+        task_id,
+        SourceResult(
+            source_key="osha",
+            contractor_id=bidder_id,
+            status=SourceResultStatus.SUCCESS_COMPLETE,
+            identity_status=IdentityStatus.CONFIRMED,
+            completeness_status=CompletenessStatus.COMPLETE,
+            searched_name="Immutable Co",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE evidence_snapshots SET searched_name='Changed' WHERE id=?",
+                (persisted["snapshot_id"],),
+            )
