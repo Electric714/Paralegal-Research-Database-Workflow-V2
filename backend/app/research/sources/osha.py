@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from typing import Iterable
 from urllib.parse import urljoin
 
 import httpx
+from rapidfuzz import fuzz
 
-from ..matching import normalize_company_name, normalize_text, score_candidate
+from ..matching import normalize_address, normalize_company_name, normalize_text, score_candidate
 from ..models import (
     CompletenessStatus,
     EvidenceRecord,
@@ -23,7 +24,8 @@ from .base import ContractorContext, ResearchSource
 SEARCH_URL = "https://www.osha.gov/ords/imis/establishment.search"
 SEARCH_PAGE_URL = "https://www.osha.gov/ords/imis/establishment.html"
 DETAIL_URL = "https://www.osha.gov/ords/imis/establishment.inspection_detail"
-MAX_SEARCH_VARIANTS = 6
+FIRST_OSHA_DATA_DATE = date(1972, 1, 1)
+MAX_SEARCH_VARIANTS = 4
 MAX_DETAIL_FETCHES = 8
 REQUEST_TIMEOUT_SECONDS = 20.0
 USER_AGENT = "ParalegalResearchDatabaseV2/1.0 (+public OSHA establishment research)"
@@ -55,6 +57,15 @@ class ParsedSearchPage:
     table_found: bool
     total_results: int | None
     complete: bool
+
+
+@dataclass(frozen=True)
+class ScoredGroup:
+    rows: tuple[OshaSearchRow, ...]
+    score: float
+    status: str
+    matched_identity: str
+    components: tuple[dict, ...]
 
 
 class OshaFetchError(RuntimeError):
@@ -105,8 +116,9 @@ class _TableParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
         if tag in {"td", "th"} and self._row is not None and self._cell_parts is not None:
-            text = _collapse_space(" ".join(self._cell_parts))
-            self._row.append(_Cell(text=text, links=list(self._cell_links)))
+            self._row.append(
+                _Cell(text=_collapse_space(" ".join(self._cell_parts)), links=list(self._cell_links))
+            )
             self._cell_parts = None
             self._cell_links = []
         elif tag == "tr" and self._row is not None:
@@ -158,6 +170,7 @@ def _canonical_header(value: str) -> str:
         "date opened": "date opened",
         "rid": "rid",
         "report id": "rid",
+        "st": "state",
         "type": "type",
         "inspection type": "type",
         "establishment": "establishment name",
@@ -167,10 +180,7 @@ def _canonical_header(value: str) -> str:
 
 def _parse_total_results(text: str) -> int | None:
     match = re.search(r"Results\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)", text, re.IGNORECASE)
-    if match:
-        return int(match.group(1).replace(",", ""))
-    zero_match = re.search(r"Results\s+0\s*-\s*0\s+of\s+0", text, re.IGNORECASE)
-    return 0 if zero_match else None
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 def parse_search_page(html: str) -> ParsedSearchPage:
@@ -196,7 +206,6 @@ def parse_search_page(html: str) -> ParsedSearchPage:
                 continue
             activity = values[header_index["activity"]].strip()
             if not re.fullmatch(r"\d+(?:\.\d+)?", activity):
-                # The first non-result table/heading after a results table ends the run.
                 if rows:
                     break
                 continue
@@ -230,8 +239,7 @@ def parse_search_page(html: str) -> ParsedSearchPage:
                     detail_url=detail_url,
                 )
             )
-        if table_found:
-            break
+        break
 
     total_results = _parse_total_results(visible_text)
     no_result_marker = bool(
@@ -241,14 +249,10 @@ def parse_search_page(html: str) -> ParsedSearchPage:
             re.IGNORECASE,
         )
     )
-    complete = False
     if table_found:
-        if total_results is None:
-            complete = True
-        else:
-            complete = total_results <= len(rows)
-    elif no_result_marker or total_results == 0:
-        complete = True
+        complete = total_results is None or total_results <= len(rows)
+    else:
+        complete = no_result_marker or total_results == 0
 
     return ParsedSearchPage(
         rows=tuple(rows),
@@ -277,13 +281,31 @@ def _extract_block(lines: list[str], label: str, stop_labels: Iterable[str]) -> 
     return ""
 
 
+def _parse_address_block(block: str) -> dict[str, str]:
+    result = {"street": "", "city": "", "state": "", "zip": ""}
+    if not block:
+        return result
+    match = re.search(
+        r"(?P<prefix>.*?)(?:\||,)\s*(?P<city>[^,|]+),\s*(?P<state>[A-Za-z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)\s*$",
+        block,
+    )
+    if not match:
+        return result
+    prefix = match.group("prefix").strip(" ,|")
+    result["street"] = prefix.split("|")[-1].strip(" ,|")
+    result["city"] = match.group("city").strip()
+    result["state"] = match.group("state").upper()
+    result["zip"] = match.group("zip")
+    return result
+
+
 def parse_inspection_detail(html: str) -> dict[str, str]:
     parser = _VisibleTextParser()
     parser.feed(html)
     lines = parser.lines()
     text = "\n".join(lines)
 
-    case_match = re.search(r"Case Status:\s*([A-Za-z /-]+)", text, re.IGNORECASE)
+    case_match = re.search(r"Case Status:\s*([^\n]+)", text, re.IGNORECASE)
     site_address = _extract_block(
         lines,
         "Site Address:",
@@ -294,12 +316,49 @@ def parse_inspection_detail(html: str) -> dict[str, str]:
         "Mailing Address:",
         ("Union Status:", "SIC:", "NAICS:", "Inspection Type:", "Scope:"),
     )
+    site = _parse_address_block(site_address)
+    mailing = _parse_address_block(mailing_address)
 
     return {
         "case_status": _collapse_space(case_match.group(1)) if case_match else "",
         "site_address": site_address,
+        "site_street": site["street"],
+        "site_city": site["city"],
+        "site_state": site["state"],
+        "site_zip": site["zip"],
         "mailing_address": mailing_address,
+        "mailing_street": mailing["street"],
+        "mailing_city": mailing["city"],
+        "mailing_state": mailing["state"],
+        "mailing_zip": mailing["zip"],
     }
+
+
+def _safe_year_replace(value: date, year: int) -> date:
+    try:
+        return value.replace(year=year)
+    except ValueError:
+        return value.replace(year=year, day=28)
+
+
+def inspection_date_windows(reference: date) -> list[tuple[date, date]]:
+    """Return contiguous <=10-year windows back to OSHA's 1972 data boundary."""
+    if reference < FIRST_OSHA_DATA_DATE:
+        return []
+    windows: list[tuple[date, date]] = []
+    end = reference
+    while end >= FIRST_OSHA_DATA_DATE:
+        if end.year - 10 <= FIRST_OSHA_DATA_DATE.year:
+            start = FIRST_OSHA_DATA_DATE
+        else:
+            start = _safe_year_replace(end, end.year - 10) + timedelta(days=1)
+        if start < FIRST_OSHA_DATA_DATE:
+            start = FIRST_OSHA_DATA_DATE
+        windows.append((start, end))
+        if start == FIRST_OSHA_DATA_DATE:
+            break
+        end = start - timedelta(days=1)
+    return windows
 
 
 def _split_related_companies(value: str) -> list[str]:
@@ -322,10 +381,10 @@ def _search_variants(contractor: ContractorContext) -> list[str]:
         variants.append(value)
 
     for raw in raw_names:
-        add(raw)
         stripped = normalize_company_name(raw)
         if len(stripped) >= 4:
             add(stripped)
+        add(raw)
         if len(variants) >= MAX_SEARCH_VARIANTS:
             break
     return variants[:MAX_SEARCH_VARIANTS]
@@ -352,11 +411,47 @@ def _row_to_payload(row: OshaSearchRow) -> dict[str, str]:
     }
 
 
+def _address_support(contractor: ContractorContext, details: list[dict[str, str]]) -> float:
+    if not contractor.address_1.strip():
+        return 0.0
+    best = 0.0
+    for detail in details:
+        candidate_street = detail.get("mailing_street", "")
+        if not candidate_street:
+            continue
+        street_score = fuzz.WRatio(
+            normalize_address(contractor.address_1), normalize_address(candidate_street)
+        ) / 100.0
+        components = [(street_score, 0.75)]
+        if contractor.city and detail.get("mailing_city"):
+            components.append(
+                (
+                    1.0
+                    if normalize_text(contractor.city) == normalize_text(detail["mailing_city"])
+                    else 0.0,
+                    0.15,
+                )
+            )
+        if contractor.state and detail.get("mailing_state"):
+            components.append(
+                (
+                    1.0
+                    if contractor.state.strip().upper() == detail["mailing_state"].strip().upper()
+                    else 0.0,
+                    0.10,
+                )
+            )
+        weight = sum(item[1] for item in components)
+        score = sum(value * item_weight for value, item_weight in components) / weight
+        best = max(best, score)
+    return round(best, 4)
+
+
 class OshaEstablishmentSource(ResearchSource):
     source_key = "osha"
     display_name = "OSHA Establishment Search"
-    adapter_version = "1.0.0"
-    parser_version = "1.0.0"
+    adapter_version = "1.1.0"
+    parser_version = "1.1.0"
 
     def __init__(
         self,
@@ -378,9 +473,16 @@ class OshaEstablishmentSource(ResearchSource):
             "acquisition_mode": "public_html_query",
             "search_url": SEARCH_URL,
             "api_key_required": False,
+            "date_strategy": "contiguous_10_year_windows_back_to_1972",
         }
 
-    def _search_request(self, search_name: str, state: str) -> tuple[ParsedSearchPage, str, int]:
+    def _search_request(
+        self,
+        search_name: str,
+        state: str,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[ParsedSearchPage, str, int]:
         params = {
             "establishment": search_name,
             "state": state or "all",
@@ -388,12 +490,12 @@ class OshaEstablishmentSource(ResearchSource):
             "office": "all",
             "p_case": "all",
             "p_violations_exist": "both",
-            "startmonth": "01",
-            "startday": "01",
-            "startyear": "1970",
-            "endmonth": f"{self.today.month:02d}",
-            "endday": f"{self.today.day:02d}",
-            "endyear": str(self.today.year),
+            "startmonth": f"{start_date.month:02d}",
+            "startday": f"{start_date.day:02d}",
+            "startyear": str(start_date.year),
+            "endmonth": f"{end_date.month:02d}",
+            "endday": f"{end_date.day:02d}",
+            "endyear": str(end_date.year),
             "p_show": "100",
         }
         try:
@@ -452,21 +554,20 @@ class OshaEstablishmentSource(ResearchSource):
             return {}
         return parse_inspection_detail(response.text)
 
-    def _best_group(
+    def _scored_groups(
         self,
         contractor: ContractorContext,
         rows: list[OshaSearchRow],
-    ) -> tuple[list[OshaSearchRow], float, str, str, list[dict]] | None:
+    ) -> list[ScoredGroup]:
         identities = _identity_names(contractor)
-        groups: dict[str, list[OshaSearchRow]] = {}
+        grouped: dict[str, list[OshaSearchRow]] = {}
         for row in rows:
             key = normalize_company_name(row.establishment_name)
-            if not key:
-                continue
-            groups.setdefault(key, []).append(row)
+            if key:
+                grouped.setdefault(key, []).append(row)
 
-        scored_groups: list[tuple[list[OshaSearchRow], float, str, str, list[dict]]] = []
-        for group_rows in groups.values():
+        scored: list[ScoredGroup] = []
+        for group_rows in grouped.values():
             candidate_name = group_rows[0].establishment_name
             candidate_state = group_rows[0].state
             best_score = -1.0
@@ -493,15 +594,49 @@ class OshaEstablishmentSource(ResearchSource):
                     best_score = score.score
                     best_status = score.status
                     matched_identity = identity_name
-
-            scored_groups.append(
-                (group_rows, best_score, best_status, matched_identity, components)
+            scored.append(
+                ScoredGroup(
+                    rows=tuple(group_rows),
+                    score=best_score,
+                    status=best_status,
+                    matched_identity=matched_identity,
+                    components=tuple(components),
+                )
             )
+        scored.sort(key=lambda item: item.score, reverse=True)
+        return scored
 
-        if not scored_groups:
-            return None
-        scored_groups.sort(key=lambda item: item[1], reverse=True)
-        return scored_groups[0]
+    def _failure_result(
+        self,
+        contractor: ContractorContext,
+        failure: OshaFetchError,
+        *,
+        warnings: list[str],
+        search_attempts: list[dict],
+        rows: list[OshaSearchRow],
+    ) -> SourceResult:
+        had_success = bool(search_attempts)
+        return self.validate_result(
+            SourceResult(
+                source_key=self.source_key,
+                contractor_id=contractor.internal_id,
+                status=SourceResultStatus.PARTIAL_RESULTS if had_success else failure.status,
+                identity_status=IdentityStatus.NOT_EVALUATED,
+                completeness_status=(
+                    CompletenessStatus.PARTIAL if had_success else CompletenessStatus.UNKNOWN
+                ),
+                searched_name=contractor.contractor_name,
+                searched_address=contractor.address_1,
+                warnings=[*warnings, str(failure)],
+                acquisition_method="public_html_query",
+                source_url=search_attempts[0]["url"] if search_attempts else SEARCH_PAGE_URL,
+                http_status=failure.http_status,
+                normalized_payload={
+                    "search_attempts": search_attempts,
+                    "candidate_rows": [_row_to_payload(row) for row in rows],
+                },
+            )
+        )
 
     def search(self, contractor: ContractorContext) -> SourceResult:
         variants = _search_variants(contractor)
@@ -521,70 +656,75 @@ class OshaEstablishmentSource(ResearchSource):
                 )
             )
 
-        state = contractor.state.strip().upper()
-        if not re.fullmatch(r"[A-Z]{2}", state):
-            state = "all"
+        bidder_state = contractor.state.strip().upper()
+        valid_state = bidder_state if re.fullmatch(r"[A-Z]{2}", bidder_state) else ""
+        scopes = [valid_state] if valid_state else ["all"]
+        if valid_state:
+            # OSHA's State field is the inspection location, not necessarily the employer's
+            # home state. Search the bidder state first for precision, then nationwide if needed.
+            scopes.append("all")
+        windows = inspection_date_windows(self.today)
 
         rows_by_activity: dict[str, OshaSearchRow] = {}
         search_attempts: list[dict] = []
         warnings: list[str] = []
-        failed_attempts: list[OshaFetchError] = []
         any_incomplete_page = False
         last_http_status: int | None = None
-        best: tuple[list[OshaSearchRow], float, str, str, list[dict]] | None = None
+        selected_scope = ""
+        selected_variant = ""
 
-        for variant in variants:
-            try:
-                parsed, request_url, http_status = self._search_request(variant, state)
-                last_http_status = http_status
-                any_incomplete_page = any_incomplete_page or not parsed.complete
-                search_attempts.append(
-                    {
-                        "query": variant,
-                        "url": request_url,
-                        "result_count_on_page": len(parsed.rows),
-                        "reported_total": parsed.total_results,
-                        "complete": parsed.complete,
-                    }
-                )
-                for row in parsed.rows:
-                    rows_by_activity[row.activity_number] = row
-                best = self._best_group(contractor, list(rows_by_activity.values()))
-                if best and best[2] == "HIGH":
+        for scope in scopes:
+            matched_in_scope = False
+            for variant in variants:
+                variant_has_high = False
+                for start_date, end_date in windows:
+                    try:
+                        parsed, request_url, http_status = self._search_request(
+                            variant, scope, start_date, end_date
+                        )
+                    except OshaFetchError as exc:
+                        return self._failure_result(
+                            contractor,
+                            exc,
+                            warnings=warnings,
+                            search_attempts=search_attempts,
+                            rows=list(rows_by_activity.values()),
+                        )
+                    last_http_status = http_status
+                    any_incomplete_page = any_incomplete_page or not parsed.complete
+                    search_attempts.append(
+                        {
+                            "query": variant,
+                            "state_scope": scope,
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "url": request_url,
+                            "result_count_on_page": len(parsed.rows),
+                            "reported_total": parsed.total_results,
+                            "complete": parsed.complete,
+                        }
+                    )
+                    for row in parsed.rows:
+                        rows_by_activity[row.activity_number] = row
+                    groups = self._scored_groups(contractor, list(rows_by_activity.values()))
+                    if groups and groups[0].status == "HIGH":
+                        variant_has_high = True
+                    # Continue all historical windows for this same variant after finding a
+                    # match so older inspections are retained in the evidence snapshot.
+                if variant_has_high:
+                    selected_scope = scope
+                    selected_variant = variant
+                    matched_in_scope = True
                     break
-            except OshaFetchError as exc:
-                failed_attempts.append(exc)
-                warnings.append(str(exc))
-
-        if not search_attempts:
-            failure = failed_attempts[0] if failed_attempts else OshaFetchError(
-                "OSHA research could not be completed.",
-                status=SourceResultStatus.SOURCE_UNAVAILABLE,
-            )
-            return self.validate_result(
-                SourceResult(
-                    source_key=self.source_key,
-                    contractor_id=contractor.internal_id,
-                    status=failure.status,
-                    identity_status=IdentityStatus.NOT_EVALUATED,
-                    completeness_status=CompletenessStatus.UNKNOWN,
-                    searched_name=contractor.contractor_name,
-                    searched_address=contractor.address_1,
-                    warnings=warnings or [str(failure)],
-                    acquisition_method="public_html_query",
-                    source_url=SEARCH_PAGE_URL,
-                    http_status=failure.http_status,
-                    normalized_payload={"search_attempts": search_attempts},
-                )
-            )
+            if matched_in_scope:
+                break
 
         all_rows = list(rows_by_activity.values())
-        best = best or self._best_group(contractor, all_rows)
-
-        if best is None or best[2] == "LOW":
+        groups = self._scored_groups(contractor, all_rows)
+        if not groups or groups[0].status == "LOW":
             status = (
                 SourceResultStatus.PARTIAL_RESULTS
-                if failed_attempts or any_incomplete_page
+                if any_incomplete_page
                 else SourceResultStatus.SUCCESS_NO_MATCH
             )
             completeness = (
@@ -603,7 +743,7 @@ class OshaEstablishmentSource(ResearchSource):
                     searched_address=contractor.address_1,
                     warnings=warnings,
                     acquisition_method="public_html_query",
-                    source_url=search_attempts[0]["url"],
+                    source_url=search_attempts[0]["url"] if search_attempts else SEARCH_PAGE_URL,
                     http_status=last_http_status,
                     normalized_payload={
                         "match_found": False,
@@ -613,76 +753,94 @@ class OshaEstablishmentSource(ResearchSource):
                 )
             )
 
-        group_rows, score_value, match_status, matched_identity, score_components = best
+        best = groups[0]
+        group_rows = list(best.rows)
         candidate_name = group_rows[0].establishment_name
         candidate_key = normalize_company_name(candidate_name)
-        competing_groups = {
-            normalize_company_name(row.establishment_name)
-            for row in all_rows
-            if normalize_company_name(row.establishment_name) != candidate_key
-        }
         exact_identity = any(
-            normalize_company_name(name) == candidate_key
-            for name in _identity_names(contractor)
+            normalize_company_name(name) == candidate_key for name in _identity_names(contractor)
         )
-
-        # Fuzzy matches stay in review. Exact normalized names (LLC/Inc punctuation ignored)
-        # or a unique HIGH score can be confirmed without pretending that a merely similar
-        # establishment is the same bidder.
-        confirmed = exact_identity or (match_status == "HIGH" and not competing_groups)
-        if match_status == "HIGH" and competing_groups:
-            # Multiple names can simply be low-quality noise from a broad search. Only make
-            # this ambiguous if another group itself scores HIGH against one of our identities.
-            other_high = False
-            for other_key in competing_groups:
-                other_rows = [row for row in all_rows if normalize_company_name(row.establishment_name) == other_key]
-                other_best = self._best_group(contractor, other_rows)
-                if other_best and other_best[2] == "HIGH":
-                    other_high = True
-                    break
-            if other_high:
-                confirmed = False
+        competing_high = any(
+            group.status == "HIGH"
+            and normalize_company_name(group.rows[0].establishment_name) != candidate_key
+            for group in groups[1:]
+        )
+        has_bidder_state_inspection = bool(
+            valid_state and any(row.state == valid_state for row in group_rows)
+        )
 
         details: list[dict[str, str]] = []
         for row in group_rows[:MAX_DETAIL_FETCHES]:
             detail = self._detail_request(row)
             if detail:
                 details.append({"activity_number": row.activity_number, **detail})
+        address_score = _address_support(contractor, details)
+        address_confirmed = address_score >= 0.82
+
+        confirmed = False
+        if not competing_high:
+            if exact_identity and has_bidder_state_inspection:
+                confirmed = True
+            elif best.status == "HIGH" and has_bidder_state_inspection:
+                confirmed = True
+            elif address_confirmed and (exact_identity or best.status == "HIGH"):
+                confirmed = True
 
         years = sorted({row.year for row in group_rows if row.year}, reverse=True)
-        violation_counts = []
-        for row in group_rows:
-            if row.violations.strip().isdigit():
-                violation_counts.append(int(row.violations.strip()))
+        violation_counts = [
+            int(row.violations.strip())
+            for row in group_rows
+            if row.violations.strip().isdigit()
+        ]
+        selected_attempts = [
+            attempt
+            for attempt in search_attempts
+            if attempt["query"] == selected_variant and attempt["state_scope"] == selected_scope
+        ]
+        history_complete = bool(selected_attempts) and all(
+            attempt["complete"] for attempt in selected_attempts
+        )
 
         payload = {
             "match_found": True,
             "matched_establishment_name": candidate_name,
-            "matched_identity_name": matched_identity,
-            "identity_score": round(score_value, 4),
-            "score_components": score_components,
+            "matched_identity_name": best.matched_identity,
+            "identity_score": round(best.score, 4),
+            "address_support_score": address_score,
+            "has_bidder_state_inspection": has_bidder_state_inspection,
+            "score_components": list(best.components),
             "inspection_count": len(group_rows),
             "inspection_years": years,
             "total_listed_violations": sum(violation_counts),
             "inspections": [_row_to_payload(row) for row in group_rows],
             "inspection_details": details,
             "search_attempts": search_attempts,
+            "selected_query": selected_variant,
+            "selected_state_scope": selected_scope,
+            "history_complete_for_selected_query": history_complete,
             "note": (
                 "OSHA severe-violation and years master-field semantics are not yet defined; "
-                "those values are retained as research evidence only and are not proposed automatically."
+                "those values are retained as research evidence only and are not proposed automatically. "
+                "OSHA State identifies inspection location, so nationwide fallback matches require extra identity support."
             ),
         }
 
         primary = group_rows[0]
         if confirmed:
+            if any_incomplete_page or not history_complete:
+                warnings.append(
+                    "A confirmed OSHA match was found, but one or more result windows may not contain every inspection row; the positive OSHA finding is still supported."
+                )
             return self.validate_result(
                 SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
                     status=SourceResultStatus.SUCCESS_WITH_FINDINGS,
                     identity_status=IdentityStatus.CONFIRMED,
+                    # Completeness here means the positive Y conclusion is supported; the
+                    # payload separately records whether the inspection history is exhaustive.
                     completeness_status=CompletenessStatus.COMPLETE,
-                    identity_confidence=min(1.0, max(0.0, score_value)),
+                    identity_confidence=min(1.0, max(0.0, best.score, address_score)),
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
                     evidence=[
@@ -693,9 +851,10 @@ class OshaEstablishmentSource(ResearchSource):
                             source_url=primary.detail_url,
                             details={
                                 "matched_establishment_name": candidate_name,
-                                "matched_identity_name": matched_identity,
+                                "matched_identity_name": best.matched_identity,
                                 "inspection_count": len(group_rows),
                                 "inspection_years": years,
+                                "address_support_score": address_score,
                             },
                         )
                     ],
@@ -718,7 +877,7 @@ class OshaEstablishmentSource(ResearchSource):
                 status=SourceResultStatus.AMBIGUOUS_MATCH,
                 identity_status=IdentityStatus.REVIEW_REQUIRED,
                 completeness_status=CompletenessStatus.COMPLETE,
-                identity_confidence=min(1.0, max(0.0, score_value)),
+                identity_confidence=min(1.0, max(0.0, best.score, address_score)),
                 searched_name=contractor.contractor_name,
                 searched_address=contractor.address_1,
                 evidence=[
@@ -727,7 +886,10 @@ class OshaEstablishmentSource(ResearchSource):
                         observed_value="Y",
                         source_record_id=primary.activity_number,
                         source_url=primary.detail_url,
-                        details={"possible_match": candidate_name},
+                        details={
+                            "possible_match": candidate_name,
+                            "address_support_score": address_score,
+                        },
                     )
                 ],
                 warnings=warnings,
