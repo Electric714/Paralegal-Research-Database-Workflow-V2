@@ -62,6 +62,37 @@ type ImportPreview = {
 
 const API = import.meta.env.VITE_API_URL || "";
 
+const BIDDER_FIELD_GROUPS = [
+  {
+    title: "Identity & addresses",
+    fields: [
+      "id", "contractor_name", "related_companies", "address_1", "city", "state", "zip",
+      "additional_address", "additional_address_city", "additional_address_state", "additional_address_zip",
+    ],
+  },
+  {
+    title: "Business & coverage",
+    fields: ["dfi", "wc", "wc_date"],
+  },
+  {
+    title: "Safety, eligibility & public works",
+    fields: [
+      "osha_severe_violations", "years", "osha", "state_federal_debarment", "mndol_ineligibility",
+      "public_works_projects_budget_time_quality_complaint",
+    ],
+  },
+  {
+    title: "Courts, regulatory & complaints",
+    fields: [
+      "federal_court", "circuit_court", "ccap_show150", "environmental_violations",
+      "prevailing_wage_violations", "dwd", "dwd_substance_abuse_plan",
+      "better_business_bureau_complaints", "misc_violations", "tax_liability",
+    ],
+  },
+] as const;
+
+const EXPECTED_BIDDER_FIELDS = BIDDER_FIELD_GROUPS.flatMap((group) => [...group.fields]);
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, options);
   if (!response.ok) {
@@ -291,7 +322,7 @@ export default function App() {
                 <Metric label="Approved bidders" value={dashboard?.bidder_count ?? 0} hint={dashboard?.active_import?.filename || "No master CSV imported"} />
                 <Metric label="Research sources" value={dashboard?.source_count ?? 14} hint={`${dashboard?.implemented_source_count ?? 0} collectors implemented`} />
                 <Metric label="Pending review" value={dashboard?.pending_review_count ?? 0} hint="Human approval required" />
-                <Metric label="Last research run" value={dashboard?.last_run ? `#${dashboard.last_run.id}` : "—"} hint={dashboard?.last_run ? formatDate(dashboard.last_run.created_at) : "No runs yet"} />
+                <Metric label="Bidder schema" value={EXPECTED_BIDDER_FIELDS.length} hint="Example database fields supported" />
               </div>
               <div className="dashboard-grid">
                 <Card>
@@ -330,7 +361,7 @@ export default function App() {
           {page === "database" && (
             <Card className="table-card">
               <div className="card-heading database-heading">
-                <div><span className="section-kicker">Approved master</span><h2>Bidder Database</h2><p>{bidderTotal} records · CSV is the import/export format; SQLite is the working store.</p></div>
+                <div><span className="section-kicker">Approved master</span><h2>Bidder Database</h2><p>{bidderTotal} records · All {EXPECTED_BIDDER_FIELDS.length} example fields are preserved; this grid shows a working summary.</p></div>
                 <div className="button-row">
                   <button className="btn secondary" onClick={() => fileInput.current?.click()}><Upload size={16} /> Import CSV</button>
                   {dashboard?.active_import && <a className="btn ghost" href={`${API}/api/export`}><Download size={16} /> Export CSV</a>}
@@ -433,8 +464,9 @@ export default function App() {
             <div className="modal-header"><div><span className="section-kicker">Import preview</span><h2>{preview.filename}</h2></div><button className="icon-button" onClick={() => setPreview(null)}><X size={20} /></button></div>
             <div className="preview-metrics"><div><strong>{preview.row_count}</strong><span>Bidder rows</span></div><div><strong>{preview.columns.length}</strong><span>Columns detected</span></div><div><strong>{preview.missing_expected_columns.length}</strong><span>Expected fields missing</span></div><div><strong>{preview.extra_columns.length}</strong><span>Additional fields</span></div></div>
             {preview.missing_expected_columns.length > 0 && <div className="warning-box"><AlertTriangle size={17} /><div><strong>Some example-schema fields are not present.</strong><span>{preview.missing_expected_columns.join(", ")}</span></div></div>}
-            <div className="preview-table table-wrap"><table><thead><tr>{preview.columns.slice(0, 7).map((column) => <th key={column}>{prettyField(column)}</th>)}</tr></thead><tbody>{preview.preview.map((row, index) => <tr key={index}>{preview.columns.slice(0, 7).map((column) => <td key={column}>{row[column] || "—"}</td>)}</tr>)}</tbody></table></div>
-            <p className="modal-note">Importing creates a snapshot of the original CSV, replaces the active working master, preserves the source columns for export, and clears stale review proposals.</p>
+            <p className="modal-note"><strong>Detected schema:</strong> {preview.columns.map(prettyField).join(" · ")}</p>
+            <div className="preview-table table-wrap"><table><thead><tr>{preview.columns.map((column) => <th key={column}>{prettyField(column)}</th>)}</tr></thead><tbody>{preview.preview.map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column}>{row[column] || "—"}</td>)}</tr>)}</tbody></table></div>
+            <p className="modal-note">Importing creates a snapshot of the original CSV, replaces the active working master, preserves every source column for export, and clears stale review proposals.</p>
             <div className="modal-actions"><button className="btn ghost" onClick={() => setPreview(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={() => void confirmImport()}><CheckCircle2 size={16} /> Confirm Import</button></div>
           </div>
         </div>
@@ -442,10 +474,25 @@ export default function App() {
 
       {selectedBidder && (
         <div className="detail-drawer">
-          <div className="drawer-header"><div><span className="section-kicker">Approved bidder</span><h2>{String(selectedBidder.contractor_name || "Bidder")}</h2><p>ID {String(selectedBidder.id || "—")}</p></div><button className="icon-button" onClick={() => setSelectedBidder(null)}><X size={20} /></button></div>
-          <div className="detail-grid">
-            {Object.entries(selectedBidder).filter(([key]) => key !== "_internal_id").map(([key, value]) => <div className="detail-field" key={key}><span>{prettyField(key)}</span><strong>{String(value || "—")}</strong></div>)}
-          </div>
+          <div className="drawer-header"><div><span className="section-kicker">Approved bidder · complete record</span><h2>{String(selectedBidder.contractor_name || "Bidder")}</h2><p>ID {String(selectedBidder.id || "—")} · {EXPECTED_BIDDER_FIELDS.length} expected fields</p></div><button className="icon-button" onClick={() => setSelectedBidder(null)}><X size={20} /></button></div>
+          {BIDDER_FIELD_GROUPS.map((group) => (
+            <section key={group.title}>
+              <span className="section-kicker">{group.title}</span>
+              <div className="detail-grid">
+                {group.fields.map((field) => <div className="detail-field" key={field}><span>{prettyField(field)}</span><strong>{String(selectedBidder[field] || "—")}</strong></div>)}
+              </div>
+            </section>
+          ))}
+          {Object.keys(selectedBidder).some((field) => field !== "_internal_id" && !EXPECTED_BIDDER_FIELDS.includes(field as any)) && (
+            <section>
+              <span className="section-kicker">Additional imported fields</span>
+              <div className="detail-grid">
+                {Object.entries(selectedBidder)
+                  .filter(([field]) => field !== "_internal_id" && !EXPECTED_BIDDER_FIELDS.includes(field as any))
+                  .map(([field, value]) => <div className="detail-field" key={field}><span>{prettyField(field)}</span><strong>{String(value || "—")}</strong></div>)}
+              </div>
+            </section>
+          )}
         </div>
       )}
 
