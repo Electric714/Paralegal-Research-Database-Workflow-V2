@@ -4,6 +4,7 @@ from datetime import date
 
 import httpx
 
+from app.research.field_mappings import source_owns_field
 from app.research.models import CompletenessStatus, IdentityStatus, SourceResultStatus
 from app.research.sources.base import ContractorContext
 from app.research.sources.osha import (
@@ -101,6 +102,12 @@ def test_historical_windows_cover_old_inspections_without_exceeding_ten_years():
     assert all(end.year - start.year <= 10 for start, end in windows)
     for current, older in zip(windows, windows[1:]):
         assert (current[0] - older[1]).days == 1
+
+
+def test_osha_field_ownership_stays_conservative_until_semantics_are_confirmed():
+    assert source_owns_field("osha", "osha") is True
+    assert source_owns_field("osha", "osha_severe_violations") is False
+    assert source_owns_field("osha", "years") is False
 
 
 def test_inspection_detail_parser_keeps_address_evidence():
