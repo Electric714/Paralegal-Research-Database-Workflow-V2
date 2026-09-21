@@ -45,12 +45,12 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — use the official DOL Open Data Portal v4 API rather than scraping the retired enforcement-data site. DOL API accounts are free; the `/v4/datasets` catalog is keyless, while metadata/data requests require a private API key that must never be committed or logged. Phase 1 will target Wage and Hour Division enforcement/compliance data with conservative bidder identity matching. Branch: `feature/dol-enforcement-api`. Automatic field ownership remains disabled until the firm's semantics are confirmed; `prevailing_wage_violations` is the strongest candidate mapping for confirmed Davis-Bacon and Related Acts findings.
+- [ ] **Wisconsin DOT Contractor Information** — automatic WisDOT/HCCI official-PDF refresh, immutable caching, debarment/vendor matching, and Finals Status evidence are implemented in PR #19 (`feature/wisdot-auto-refresh-implementation`). Confirmed debarred/suspended/ineligible matches may propose `state_federal_debarment = Y`; WisDOT no-match never proposes `N`; Finals Status remains evidence-only. Final representative real-bidder/end-to-end verification remains before marking complete.
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
-- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
@@ -76,7 +76,7 @@ A source moves from **Ongoing** to **Completed** only when all applicable gates 
 
 ### Recommended Implementation Order
 
-Finish and verify the active source tracks first: **SAM.gov → OSHA → WDFI → BBB → WCRB → WCCA/CCAP → Violation Tracker → DOL Enforcement**. DOL Enforcement should use the official v4 Open Data API and begin with WHD enforcement data rather than scraping the retired Enforcement Data site. Then proceed to structured enforcement/debarment sources such as **Wisconsin DOT, Minnesota Debarment, and Minnesota PCA**. The former **GSA State Suspension / Debarment Directory** is not an implementation target; use the underlying authoritative state sources directly. **PACER remains an ongoing problem item until a reliable no-cost acquisition method is identified; do not implement the fee-based PACER API/search workflow.**
+Finish and verify the active source tracks first: **SAM.gov → OSHA → WDFI → BBB → WCRB → WCCA/CCAP → Violation Tracker → DOL Enforcement → Wisconsin DOT**. DOL Enforcement should use the official v4 Open Data API and begin with WHD enforcement data rather than scraping the retired Enforcement Data site. Wisconsin DOT uses automatic official-PDF refresh and local cached matching rather than per-bidder scraping. Then proceed to structured enforcement/debarment sources such as **Minnesota Debarment and Minnesota PCA**. The former **GSA State Suspension / Debarment Directory** is not an implementation target; use the underlying authoritative state sources directly. **PACER remains an ongoing problem item until a reliable no-cost acquisition method is identified; do not implement the fee-based PACER API/search workflow.**
 
 ## Project Goal
 
@@ -110,7 +110,7 @@ These are the primary sites the firm's staff currently checks:
 6. SAM.gov — https://www.sam.gov/SAM/
 7. Better Business Bureau — https://www.bbb.org/
 8. Violation Tracker — https://violationtracker.goodjobsfirst.org/
-9. Wisconsin DOT contractor information — http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx
+9. Wisconsin DOT contractor information — https://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx
 10. U.S. Department of Labor Enforcement Data — https://data.dol.gov/ (official API: https://apiprod.dol.gov/v4)
 11. GSA OIG state suspension/debarment directory — legacy/meta-directory only; no direct integration is needed. Use the authoritative state sources it was intended to point to instead.
 12. Minnesota debarred vendors — http://www.mmd.admin.state.mn.us/debarredreport.asp
