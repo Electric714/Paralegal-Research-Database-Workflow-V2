@@ -3,18 +3,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
-import os
 import re
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from email.message import Message
 from pathlib import Path
-from typing import Any, Iterable
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from typing import Iterable
 
-import httpx
 from rapidfuzz import fuzz, process
 
 from ... import database as db
@@ -30,7 +25,6 @@ from ..models import (
 from .base import ContractorContext, ResearchSource
 
 
-SAM_EXTRACT_API = "https://api.sam.gov/data-services/v1/extracts"
 SAM_PUBLIC_SEARCH = "https://sam.gov/entity-information"
 MAX_EXTRACT_BYTES = 150 * 1024 * 1024
 MAX_UNCOMPRESSED_CSV_BYTES = 250 * 1024 * 1024
@@ -42,7 +36,19 @@ class SamExtractError(ValueError):
 
 
 class SamDownloadError(RuntimeError):
-    def __init__(self, message: str, *, status: SourceResultStatus, http_status: int | None = None):
+    """Compatibility error type for source preparation failures.
+
+    SAM research is upload-only in V2. The name is retained because other modules
+    already import it, but the runtime adapter never performs SAM API downloads.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: SourceResultStatus,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.http_status = http_status
@@ -78,7 +84,9 @@ class SamExclusionRecord:
         base = "|".join(
             [self.uei_sam, self.name, self.exclusion_type, self.active_date, self.excluding_agency]
         )
-        return "sam-" + hashlib.sha256(base.encode("utf-8", errors="replace")).hexdigest()[:20]
+        return "sam-" + hashlib.sha256(
+            base.encode("utf-8", errors="replace")
+        ).hexdigest()[:20]
 
     @property
     def identity_key(self) -> tuple[str, str, str, str]:
@@ -212,7 +220,8 @@ def _safe_zip_csv(data: bytes) -> tuple[str, bytes]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             candidates = [
-                info for info in archive.infolist()
+                info
+                for info in archive.infolist()
                 if not info.is_dir() and info.filename.lower().endswith(".csv")
             ]
             if not candidates:
@@ -256,30 +265,33 @@ def _mapped_headers(fieldnames: Iterable[str]) -> dict[str, str]:
     return mapped
 
 
-def parse_sam_exclusions(data: bytes, filename: str) -> tuple[str, list[SamExclusionRecord]]:
+def parse_sam_exclusions(
+    data: bytes,
+    filename: str,
+) -> tuple[str, list[SamExclusionRecord]]:
     csv_name, csv_bytes = extract_csv_bytes(data, filename)
     text = _decode_csv(csv_bytes)
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if not reader.fieldnames:
         raise SamExtractError("SAM exclusions CSV has no header row.")
-    # Preserve the exact DictReader keys for row lookup. Header normalization is
-    # used only to map the official labels to semantic fields.
-    mapped = _mapped_headers([str(value or "") for value in reader.fieldnames])
 
+    mapped = _mapped_headers([str(value or "") for value in reader.fieldnames])
     records: list[SamExclusionRecord] = []
+
     for raw in reader:
+
         def value(field: str) -> str:
             original = mapped.get(field)
             return (raw.get(original, "") if original else "") or ""
 
         classification = value("classification").strip()
-        # The bidder database contains contractor/business entities. Individuals and
-        # vessels are intentionally excluded from this bidder-focused candidate pool.
         if normalize_text(classification) != "firm":
             continue
+
         name = value("name").strip()
         if not name:
             continue
+
         records.append(
             SamExclusionRecord(
                 classification=classification,
@@ -304,14 +316,18 @@ def parse_sam_exclusions(data: bytes, filename: str) -> tuple[str, list[SamExclu
                 creation_date=value("creation_date").strip(),
             )
         )
+
     if not records:
         raise SamExtractError("SAM exclusions extract contains no Firm records.")
     return csv_name, records
 
 
 def parse_extract_date(filename: str) -> date | None:
-    # Current SAM naming is SAM_Exclusions_Public_Extract_V2_YYDDD.ZIP.
-    match = re.search(r"(?:_|\b)(\d{5})(?=\.(?:zip|csv)$|\b)", Path(filename).name, re.I)
+    match = re.search(
+        r"(?:_|\b)(\d{5})(?=\.(?:zip|csv)$|\b)",
+        Path(filename).name,
+        re.I,
+    )
     if not match:
         return None
     try:
@@ -335,220 +351,96 @@ def _artifact_relative(path: Path) -> str:
         return path.resolve().as_posix()
 
 
-def store_uploaded_extract(data: bytes, filename: str, *, cache_dir: Path | None = None) -> SamDataset:
+def store_uploaded_extract(
+    data: bytes,
+    filename: str,
+    *,
+    cache_dir: Path | None = None,
+) -> SamDataset:
+    """Store an uploaded extract without overwriting prior evidence bytes."""
+
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name) or "sam_exclusions.zip"
     csv_name, records = parse_sam_exclusions(data, safe_name)
+    digest = _sha256(data)
+
     target_dir = cache_dir or _cache_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / safe_name
-    target.write_bytes(data)
+    version_dir = target_dir / digest[:16]
+    version_dir.mkdir(parents=True, exist_ok=True)
+    target = version_dir / safe_name
+
+    if not target.exists():
+        target.write_bytes(data)
+    else:
+        existing = target.read_bytes()
+        if _sha256(existing) != digest:
+            raise SamExtractError(
+                "SAM cache collision detected; refusing to overwrite existing evidence bytes."
+            )
+
     return SamDataset(
         records=tuple(records),
         path=target,
-        sha256=_sha256(data),
+        sha256=digest,
         extract_date=parse_extract_date(safe_name) or parse_extract_date(csv_name),
         csv_name=csv_name,
         source="manual_upload",
     )
 
 
-def _filename_from_headers(response: httpx.Response) -> str | None:
-    raw = response.headers.get("content-disposition")
-    if not raw:
+def _load_dataset_from_path(path: Path) -> SamDataset | None:
+    try:
+        data = path.read_bytes()
+        csv_name, records = parse_sam_exclusions(data, path.name)
+        return SamDataset(
+            records=tuple(records),
+            path=path,
+            sha256=_sha256(data),
+            extract_date=parse_extract_date(path.name) or parse_extract_date(csv_name),
+            csv_name=csv_name,
+            source="cache",
+        )
+    except (OSError, SamExtractError):
         return None
-    message = Message()
-    message["content-disposition"] = raw
-    return message.get_filename()
-
-
-def _looks_like_extract(response: httpx.Response) -> bool:
-    data = response.content
-    content_type = response.headers.get("content-type", "").casefold()
-    filename = (_filename_from_headers(response) or "").casefold()
-    if data.startswith(b"PK\x03\x04"):
-        return True
-    if filename.endswith((".zip", ".csv")):
-        return True
-    if "zip" in content_type or "csv" in content_type or "octet-stream" in content_type:
-        return bool(data)
-    return False
-
-
-def _walk_json_strings(value: Any, path: tuple[str, ...] = ()) -> Iterable[tuple[tuple[str, ...], str]]:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield from _walk_json_strings(item, (*path, str(key)))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            yield from _walk_json_strings(item, (*path, str(index)))
-    elif isinstance(value, str):
-        yield path, value.strip()
-
-
-def _json_download_reference(response: httpx.Response) -> tuple[str | None, str | None]:
-    try:
-        payload = response.json()
-    except (ValueError, json.JSONDecodeError):
-        return None, None
-
-    file_name: str | None = None
-    download_url: str | None = None
-    for path, value in _walk_json_strings(payload):
-        if not value:
-            continue
-        key = "".join(path).casefold()
-        lower = value.casefold()
-        if value.startswith(("https://", "http://")) and any(token in key for token in ("url", "link", "download")):
-            download_url = download_url or value
-        if lower.endswith((".zip", ".csv")) and not value.startswith(("https://", "http://")):
-            if any(token in key for token in ("file", "name", "extract")):
-                file_name = file_name or Path(value).name
-    return file_name, download_url
-
-
-def _sam_url_with_key(url: str, api_key: str) -> str:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").casefold()
-    if parsed.scheme != "https" or not (host == "sam.gov" or host.endswith(".sam.gov")):
-        raise SamDownloadError(
-            "SAM.gov returned a download URL on an unexpected host; refusing to fetch it automatically.",
-            status=SourceResultStatus.DATASET_MALFORMED,
-        )
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.setdefault("api_key", api_key)
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
-def _classify_http_error(response: httpx.Response) -> SamDownloadError:
-    if response.status_code in {401, 403}:
-        return SamDownloadError(
-            "SAM.gov rejected the API key or the account is not authorized for public extracts.",
-            status=SourceResultStatus.AUTH_REQUIRED,
-            http_status=response.status_code,
-        )
-    return SamDownloadError(
-        f"SAM exclusions extract returned HTTP {response.status_code}.",
-        status=SourceResultStatus.HTTP_ERROR,
-        http_status=response.status_code,
-    )
-
-
-def _resolve_extract_response(
-    client: httpx.Client,
-    response: httpx.Response,
-    *,
-    api_key: str,
-) -> tuple[bytes, str]:
-    if response.status_code != 200:
-        raise _classify_http_error(response)
-
-    if _looks_like_extract(response):
-        filename = _filename_from_headers(response)
-        if not filename:
-            # Never invent today's date. The CSV name inside an official ZIP can
-            # still establish freshness; otherwise the extract remains undated and
-            # therefore partial.
-            filename = "SAM_Exclusions_Public_Extract_V2_download.ZIP" if response.content.startswith(b"PK\x03\x04") else "SAM_Exclusions_Public_Extract_V2_download.CSV"
-        return response.content, filename
-
-    file_name, download_url = _json_download_reference(response)
-    follow_up: httpx.Response | None = None
-    if file_name:
-        follow_up = client.get(
-            SAM_EXTRACT_API,
-            params={"api_key": api_key, "fileName": file_name},
-            headers={"Accept": "application/zip, application/json"},
-        )
-    elif download_url:
-        follow_up = client.get(
-            _sam_url_with_key(download_url, api_key),
-            headers={"Accept": "application/zip, application/json"},
-        )
-
-    if follow_up is None:
-        raise SamDownloadError(
-            "SAM.gov returned JSON, but no usable extract file reference was present.",
-            status=SourceResultStatus.DATASET_MALFORMED,
-            http_status=response.status_code,
-        )
-    if follow_up.status_code != 200:
-        raise _classify_http_error(follow_up)
-    if not _looks_like_extract(follow_up):
-        raise SamDownloadError(
-            "SAM.gov returned a file reference, but the follow-up response was not a ZIP or CSV extract.",
-            status=SourceResultStatus.DATASET_MALFORMED,
-            http_status=follow_up.status_code,
-        )
-    resolved_name = _filename_from_headers(follow_up) or file_name
-    if not resolved_name:
-        resolved_name = "SAM_Exclusions_Public_Extract_V2_download.ZIP" if follow_up.content.startswith(b"PK\x03\x04") else "SAM_Exclusions_Public_Extract_V2_download.CSV"
-    return follow_up.content, resolved_name
-
-
-def download_latest_extract(*, api_key: str, cache_dir: Path | None = None) -> SamDataset:
-    api_key = api_key.strip()
-    if not api_key:
-        raise SamDownloadError(
-            "SAM public extract download requires a SAM.gov API key.",
-            status=SourceResultStatus.AUTH_REQUIRED,
-        )
-    try:
-        with httpx.Client(timeout=httpx.Timeout(120.0, connect=20.0), follow_redirects=True) as client:
-            response = client.get(
-                SAM_EXTRACT_API,
-                params={"api_key": api_key, "fileType": "EXCLUSION"},
-                headers={"Accept": "application/zip, application/json"},
-            )
-            data, filename = _resolve_extract_response(client, response, api_key=api_key)
-    except SamDownloadError:
-        raise
-    except httpx.TimeoutException as exc:
-        raise SamDownloadError("SAM exclusions extract download timed out.", status=SourceResultStatus.TIMEOUT) from exc
-    except httpx.HTTPError as exc:
-        raise SamDownloadError("SAM exclusions extract download failed.", status=SourceResultStatus.SOURCE_UNAVAILABLE) from exc
-
-    try:
-        dataset = store_uploaded_extract(data, filename, cache_dir=cache_dir)
-    except SamExtractError as exc:
-        raise SamDownloadError(
-            f"SAM.gov responded, but the exclusions extract could not be parsed: {exc}",
-            status=SourceResultStatus.DATASET_MALFORMED,
-            http_status=response.status_code,
-        ) from exc
-    return SamDataset(
-        records=dataset.records,
-        path=dataset.path,
-        sha256=dataset.sha256,
-        extract_date=dataset.extract_date,
-        csv_name=dataset.csv_name,
-        source="sam_api",
-    )
 
 
 def load_cached_extract(*, cache_dir: Path | None = None) -> SamDataset | None:
+    """Load the newest valid official extract date, not merely the newest upload."""
+
     directory = cache_dir or _cache_dir()
     if not directory.exists():
         return None
-    candidates = sorted(
-        [path for path in directory.iterdir() if path.is_file() and path.suffix.casefold() in {".zip", ".csv"}],
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    for path in candidates:
-        try:
-            data = path.read_bytes()
-            csv_name, records = parse_sam_exclusions(data, path.name)
-            return SamDataset(
-                records=tuple(records),
-                path=path,
-                sha256=_sha256(data),
-                extract_date=parse_extract_date(path.name) or parse_extract_date(csv_name),
-                csv_name=csv_name,
-                source="cache",
-            )
-        except (OSError, SamExtractError):
+
+    paths = [
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".zip", ".csv"}
+    ]
+
+    loaded: list[tuple[SamDataset, float]] = []
+    for path in paths:
+        dataset = _load_dataset_from_path(path)
+        if dataset is None:
             continue
-    return None
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        loaded.append((dataset, mtime))
+
+    if not loaded:
+        return None
+
+    dated = [item for item in loaded if item[0].extract_date is not None]
+    pool = dated or loaded
+    dataset, _mtime = max(
+        pool,
+        key=lambda item: (
+            item[0].extract_date or date.min,
+            item[1],
+            item[0].sha256,
+        ),
+    )
+    return dataset
 
 
 def _related_names(contractor: ContractorContext) -> list[str]:
@@ -559,6 +451,7 @@ def _related_names(contractor: ContractorContext) -> list[str]:
             for part in re.split(r"[;|\n]+", contractor.related_companies)
             if part.strip()
         )
+
     seen: set[str] = set()
     result: list[str] = []
     for name in names:
@@ -593,10 +486,12 @@ def _remembered_judgment(bidder_id: int, record_id: str) -> str | None:
 
 
 class SamExclusionsSource(ResearchSource):
+    """Shared SAM exclusions parser/search base for the upload-only V2 adapter."""
+
     source_key = "sam"
     display_name = "SAM.gov Federal Exclusions"
-    adapter_version = "1.1.0"
-    parser_version = "1.0.1"
+    adapter_version = "1.2.0"
+    parser_version = "1.1.0"
 
     def __init__(
         self,
@@ -605,7 +500,7 @@ class SamExclusionsSource(ResearchSource):
         cache_dir: Path | None = None,
         today: date | None = None,
     ) -> None:
-        self.api_key = api_key if api_key is not None else os.getenv("SAM_API_KEY", "")
+        _ = api_key
         self.cache_dir = cache_dir
         self.today = today
         self.dataset: SamDataset | None = None
@@ -631,57 +526,46 @@ class SamExclusionsSource(ResearchSource):
         return {
             "source_key": self.source_key,
             "implemented": True,
-            "api_key_configured": bool(self.api_key.strip()),
+            "acquisition_mode": "manual_upload",
             "cached_extract": cached.path.name if cached else None,
-            "cached_extract_date": cached.extract_date.isoformat() if cached and cached.extract_date else None,
+            "cached_extract_date": (
+                cached.extract_date.isoformat()
+                if cached and cached.extract_date
+                else None
+            ),
             "cached_record_count": len(cached.records) if cached else 0,
         }
 
     def prepare(self) -> None:
         self.prepare_failure = None
         self.prepare_warnings = []
-        cached = load_cached_extract(cache_dir=self.cache_dir)
-        self.dataset = cached
+        self.dataset = load_cached_extract(cache_dir=self.cache_dir)
 
-        cached_age: int | None = None
-        if cached and cached.extract_date:
-            reference = self.today or datetime.now(timezone.utc).date()
-            cached_age = (reference - cached.extract_date).days
-
-        should_download = not cached or cached_age is None or cached_age > MAX_FRESH_AGE_DAYS
-        if should_download and self.api_key.strip():
-            try:
-                self.dataset = download_latest_extract(api_key=self.api_key, cache_dir=self.cache_dir)
-            except SamDownloadError as exc:
-                if cached:
-                    self.dataset = cached
-                    self.prepare_warnings.append(
-                        f"Latest SAM extract could not be downloaded; using cached file {cached.path.name}. {exc}"
-                    )
-                else:
-                    self.prepare_failure = exc
-                    self.dataset = None
-        elif not cached and not self.api_key.strip():
+        if self.dataset is None:
             self.prepare_failure = SamDownloadError(
-                "No SAM exclusion extract is cached and SAM_API_KEY is not configured. Upload an official SAM Public Exclusions V2 extract or configure a SAM.gov API key.",
-                status=SourceResultStatus.AUTH_REQUIRED,
+                "No SAM exclusions extract has been uploaded. Upload the official SAM Public Exclusions V2 CSV or ZIP before running SAM research.",
+                status=SourceResultStatus.SOURCE_UNAVAILABLE,
             )
+            self._name_choices_global = []
+            self._name_choices_by_state = {}
+            self._name_to_records = {}
+            return
 
-        if self.dataset:
-            self._build_index(self.dataset.records)
-            if not self.dataset.extract_date:
-                self.prepare_warnings.append(
-                    "The SAM extract date could not be determined from the file name; results are treated as partial."
-                )
-            elif not self.dataset_is_fresh:
-                self.prepare_warnings.append(
-                    f"SAM extract {self.dataset.path.name} is {self._dataset_age_days()} days old; results are treated as partial until a current extract is loaded."
-                )
+        self._build_index(self.dataset.records)
+        if not self.dataset.extract_date:
+            self.prepare_warnings.append(
+                "The SAM extract date could not be determined from the uploaded file name; no-match results are treated as partial."
+            )
+        elif not self.dataset_is_fresh:
+            self.prepare_warnings.append(
+                f"SAM extract {self.dataset.path.name} is {self._dataset_age_days()} days old; results are treated as partial until a current extract is uploaded."
+            )
 
     def _build_index(self, records: Iterable[SamExclusionRecord]) -> None:
         name_to_records: dict[str, list[SamExclusionRecord]] = {}
         states: dict[str, set[str]] = {}
         global_names: set[str] = set()
+
         for record in records:
             state = normalize_text(record.state)
             for source_name in _record_names(record):
@@ -692,11 +576,17 @@ class SamExclusionsSource(ResearchSource):
                 global_names.add(normalized)
                 if state:
                     states.setdefault(state, set()).add(normalized)
+
         self._name_to_records = name_to_records
         self._name_choices_global = sorted(global_names)
-        self._name_choices_by_state = {key: sorted(values) for key, values in states.items()}
+        self._name_choices_by_state = {
+            key: sorted(values) for key, values in states.items()
+        }
 
-    def _candidate_records(self, contractor: ContractorContext) -> list[SamExclusionRecord]:
+    def _candidate_records(
+        self,
+        contractor: ContractorContext,
+    ) -> list[SamExclusionRecord]:
         search_names = _related_names(contractor)
         record_ids: set[str] = set()
         result: list[SamExclusionRecord] = []
@@ -708,11 +598,11 @@ class SamExclusionsSource(ResearchSource):
                     result.append(record)
 
         for name in search_names:
-            normalized = normalize_company_name(name)
-            add_name(normalized)
+            add_name(normalize_company_name(name))
 
         state = normalize_text(contractor.state)
         choices = self._name_choices_by_state.get(state) or self._name_choices_global
+
         for search_name in search_names:
             normalized = normalize_company_name(search_name)
             if not normalized or not choices:
@@ -727,8 +617,6 @@ class SamExclusionsSource(ResearchSource):
                 if similarity >= 72:
                     add_name(choice)
 
-        # State-filtered fuzzy search is the normal fast path. If it produced no
-        # candidates, do a small global fallback in case the SAM address differs.
         if not result and state and self._name_choices_global:
             for search_name in search_names:
                 normalized = normalize_company_name(search_name)
@@ -741,10 +629,16 @@ class SamExclusionsSource(ResearchSource):
                 ):
                     if similarity >= 80:
                         add_name(choice)
+
         return result
 
-    def _score_record(self, contractor: ContractorContext, record: SamExclusionRecord) -> CandidateMatch:
+    def _score_record(
+        self,
+        contractor: ContractorContext,
+        record: SamExclusionRecord,
+    ) -> CandidateMatch:
         best = None
+
         for master_name in _related_names(contractor):
             for candidate_name in _record_names(record):
                 score = score_candidate(
@@ -759,16 +653,30 @@ class SamExclusionsSource(ResearchSource):
                 )
                 if best is None or score.score > best[0].score:
                     best = (score, master_name, candidate_name)
+
         assert best is not None
         score, matched_search_name, matched_record_name = best
-        zip_match = bool(contractor.zip and record.zip_code) and re.sub(r"\D", "", contractor.zip)[:5] == re.sub(r"\D", "", record.zip_code)[:5]
+
+        zip_match = (
+            bool(contractor.zip and record.zip_code)
+            and re.sub(r"\D", "", contractor.zip)[:5]
+            == re.sub(r"\D", "", record.zip_code)[:5]
+        )
         has_location_confirmation = (
             score.address_score >= 0.90
             or zip_match
-            or (score.city_score == 1.0 and score.state_score == 1.0 and bool(contractor.city and contractor.state))
+            or (
+                score.city_score == 1.0
+                and score.state_score == 1.0
+                and bool(contractor.city and contractor.state)
+            )
         )
         auto_confirmable = score.name_score >= 0.97 and has_location_confirmation
-        judgment = _remembered_judgment(contractor.internal_id, record.record_id)
+        judgment = _remembered_judgment(
+            contractor.internal_id,
+            record.record_id,
+        )
+
         return CandidateMatch(
             record=record,
             score=score.score,
@@ -784,8 +692,15 @@ class SamExclusionsSource(ResearchSource):
 
     def _failure_result(self, contractor: ContractorContext) -> SourceResult:
         failure = self.prepare_failure
-        status = failure.status if isinstance(failure, SamDownloadError) else SourceResultStatus.DATASET_MALFORMED
-        http_status = failure.http_status if isinstance(failure, SamDownloadError) else None
+        status = (
+            failure.status
+            if isinstance(failure, SamDownloadError)
+            else SourceResultStatus.DATASET_MALFORMED
+        )
+        http_status = (
+            failure.http_status if isinstance(failure, SamDownloadError) else None
+        )
+
         return self.validate_result(
             SourceResult(
                 source_key=self.source_key,
@@ -808,53 +723,87 @@ class SamExclusionsSource(ResearchSource):
         if self.dataset is None:
             return self._failure_result(contractor)
 
-        candidates = [self._score_record(contractor, record) for record in self._candidate_records(contractor)]
-        candidates = [item for item in candidates if item.score >= 0.72 and item.remembered_judgment != "DIFFERENT_ENTITY"]
+        candidates = [
+            self._score_record(contractor, record)
+            for record in self._candidate_records(contractor)
+        ]
+        candidates = [
+            item
+            for item in candidates
+            if item.score >= 0.72
+            and item.remembered_judgment != "DIFFERENT_ENTITY"
+        ]
         candidates.sort(key=lambda item: item.score, reverse=True)
 
         fresh = self.dataset_is_fresh
-        completeness = CompletenessStatus.COMPLETE if fresh else CompletenessStatus.PARTIAL
+        completeness = (
+            CompletenessStatus.COMPLETE
+            if fresh
+            else CompletenessStatus.PARTIAL
+        )
+
         artifact = RawArtifact(
             artifact_type="sam_exclusions_extract",
             relative_path=_artifact_relative(self.dataset.path),
             sha256=self.dataset.sha256,
-            mime_type="application/zip" if self.dataset.path.suffix.casefold() == ".zip" else "text/csv",
+            mime_type=(
+                "application/zip"
+                if self.dataset.path.suffix.casefold() == ".zip"
+                else "text/csv"
+            ),
             metadata={
                 "filename": self.dataset.path.name,
                 "csv_name": self.dataset.csv_name,
-                "extract_date": self.dataset.extract_date.isoformat() if self.dataset.extract_date else None,
+                "extract_date": (
+                    self.dataset.extract_date.isoformat()
+                    if self.dataset.extract_date
+                    else None
+                ),
                 "record_count": len(self.dataset.records),
                 "source": self.dataset.source,
             },
         )
+
         common_payload = {
             "dataset": artifact.metadata,
             "candidate_count": len(candidates),
-            "top_candidates": [candidate.as_dict() for candidate in candidates[:5]],
+            "top_candidates": [
+                candidate.as_dict() for candidate in candidates[:5]
+            ],
         }
         warnings = list(self.prepare_warnings)
 
-        remembered_same = [item for item in candidates if item.remembered_judgment == "SAME_ENTITY"]
+        remembered_same = [
+            item
+            for item in candidates
+            if item.remembered_judgment == "SAME_ENTITY"
+        ]
         strong = [item for item in candidates if item.auto_confirmable]
         confirmed_pool = remembered_same or strong
 
         if confirmed_pool:
-            # Multiple active exclusion rows can legitimately belong to the same
-            # contractor. Treat them as one identity only when their identity keys
-            # agree; otherwise surface ambiguity rather than guessing.
-            identity_keys = {item.record.identity_key for item in confirmed_pool}
+            identity_keys = {
+                item.record.identity_key for item in confirmed_pool
+            }
             if len(identity_keys) > 1 and not remembered_same:
                 return self.validate_result(
                     SourceResult(
                         source_key=self.source_key,
                         contractor_id=contractor.internal_id,
-                        status=SourceResultStatus.AMBIGUOUS_MATCH if fresh else SourceResultStatus.PARTIAL_RESULTS,
+                        status=(
+                            SourceResultStatus.AMBIGUOUS_MATCH
+                            if fresh
+                            else SourceResultStatus.PARTIAL_RESULTS
+                        ),
                         identity_status=IdentityStatus.REVIEW_REQUIRED,
                         completeness_status=completeness,
                         identity_confidence=confirmed_pool[0].score,
                         searched_name=contractor.contractor_name,
                         searched_address=contractor.address_1,
-                        warnings=warnings + ["Multiple strong SAM records appear to represent different identities."],
+                        warnings=warnings
+                        + [
+                            "Multiple strong SAM records appear to represent different identities."
+                        ],
                         artifacts=[artifact],
                         normalized_payload=common_payload,
                         source_url=SAM_PUBLIC_SEARCH,
@@ -863,8 +812,15 @@ class SamExclusionsSource(ResearchSource):
                 )
 
             primary = confirmed_pool[0]
-            matching_identity = [item for item in candidates if item.record.identity_key == primary.record.identity_key]
-            match_details = [item.as_dict() for item in matching_identity]
+            matching_identity = [
+                item
+                for item in candidates
+                if item.record.identity_key == primary.record.identity_key
+            ]
+            match_details = [
+                item.as_dict() for item in matching_identity
+            ]
+
             evidence = EvidenceRecord(
                 field_name="state_federal_debarment",
                 observed_value="Y",
@@ -874,14 +830,23 @@ class SamExclusionsSource(ResearchSource):
                     "basis": "Active federal exclusion in SAM.gov Public Exclusions V2 extract",
                     "active_exclusion_count": len(matching_identity),
                     "matches": match_details,
-                    "dataset_extract_date": self.dataset.extract_date.isoformat() if self.dataset.extract_date else None,
+                    "dataset_extract_date": (
+                        self.dataset.extract_date.isoformat()
+                        if self.dataset.extract_date
+                        else None
+                    ),
                 },
             )
+
             return self.validate_result(
                 SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
-                    status=SourceResultStatus.SUCCESS_WITH_FINDINGS if fresh else SourceResultStatus.PARTIAL_RESULTS,
+                    status=(
+                        SourceResultStatus.SUCCESS_WITH_FINDINGS
+                        if fresh
+                        else SourceResultStatus.PARTIAL_RESULTS
+                    ),
                     identity_status=IdentityStatus.CONFIRMED,
                     completeness_status=completeness,
                     identity_confidence=primary.score,
@@ -890,26 +855,40 @@ class SamExclusionsSource(ResearchSource):
                     evidence=[evidence],
                     warnings=warnings,
                     artifacts=[artifact],
-                    normalized_payload={**common_payload, "confirmed_matches": match_details},
+                    normalized_payload={
+                        **common_payload,
+                        "confirmed_matches": match_details,
+                    },
                     source_record_id=primary.record.record_id,
                     source_url=SAM_PUBLIC_SEARCH,
                     acquisition_method="sam_public_exclusions_v2_extract",
                 )
             )
 
-        medium = [item for item in candidates if item.score >= 0.78 and item.name_score >= 0.75]
+        medium = [
+            item
+            for item in candidates
+            if item.score >= 0.78 and item.name_score >= 0.75
+        ]
         if medium:
             return self.validate_result(
                 SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
-                    status=SourceResultStatus.AMBIGUOUS_MATCH if fresh else SourceResultStatus.PARTIAL_RESULTS,
+                    status=(
+                        SourceResultStatus.AMBIGUOUS_MATCH
+                        if fresh
+                        else SourceResultStatus.PARTIAL_RESULTS
+                    ),
                     identity_status=IdentityStatus.REVIEW_REQUIRED,
                     completeness_status=completeness,
                     identity_confidence=medium[0].score,
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
-                    warnings=warnings + ["SAM returned a possible company match that is not strong enough to auto-confirm."],
+                    warnings=warnings
+                    + [
+                        "SAM returned a possible company match that is not strong enough to auto-confirm."
+                    ],
                     artifacts=[artifact],
                     normalized_payload=common_payload,
                     source_url=SAM_PUBLIC_SEARCH,
@@ -927,7 +906,10 @@ class SamExclusionsSource(ResearchSource):
                     completeness_status=CompletenessStatus.PARTIAL,
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
-                    warnings=warnings + ["No match was found, but the SAM extract is not current enough for a clean negative result."],
+                    warnings=warnings
+                    + [
+                        "No match was found, but the SAM extract is not current enough for a clean negative result."
+                    ],
                     artifacts=[artifact],
                     normalized_payload=common_payload,
                     source_url=SAM_PUBLIC_SEARCH,
