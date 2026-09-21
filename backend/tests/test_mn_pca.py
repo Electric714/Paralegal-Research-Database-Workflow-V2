@@ -68,12 +68,22 @@ def test_complete_dataset_no_match_is_clean_negative_but_never_proposes_n():
     assert "never proposes" in result.normalized_payload["negative_semantics"]
 
 
-def test_similar_name_requires_review():
+def test_typo_name_requires_review():
     body = CSV.replace("Acme Construction LLC", "Acme Constrction LLC")
     result = source_for(body).search(contractor())
     assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
     assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
     assert result.is_clean_negative is False
+    assert result.evidence[0].details["master_field_proposal_allowed"] is False
+
+
+def test_legal_name_expansion_requires_review_instead_of_clean_negative():
+    body = CSV.replace("Acme Construction LLC", "Acme Construction Services LLC")
+    result = source_for(body).search(contractor())
+    assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
+    assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
+    assert result.is_clean_negative is False
+    assert result.evidence[0].details["candidate_party"] == "Acme Construction Services LLC"
     assert result.evidence[0].details["master_field_proposal_allowed"] is False
 
 
