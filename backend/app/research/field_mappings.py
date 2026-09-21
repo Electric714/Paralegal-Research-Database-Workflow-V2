@@ -38,8 +38,8 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     ),
     "wisdot": SourceFieldMapping(
         "wisdot",
-        frozenset(),
-        "Exact bidder-field ownership must be confirmed before automatic proposals.",
+        frozenset({"state_federal_debarment"}),
+        "Confirmed current WisDOT debarred/suspended/ineligible records may propose Y only; no-match never emits N. Finals/project-status findings remain evidence-only.",
     ),
     "dol_enforcement": SourceFieldMapping(
         "dol_enforcement",

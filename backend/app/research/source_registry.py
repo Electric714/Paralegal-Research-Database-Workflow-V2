@@ -6,6 +6,7 @@ from .sources.osha import OshaEstablishmentSource
 from .sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources.wcca import WccaOperatorAssistedSource
 from .sources.wdfi import WdfiCorporateRecordsSource
+from .sources.wisdot import WisdotContractorSource
 
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
@@ -14,6 +15,7 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "sam": SamUploadedExclusionsSource,
     "wcca": WccaOperatorAssistedSource,
     "wdfi": WdfiCorporateRecordsSource,
+    "wisdot": WisdotContractorSource,
 }
 
 
