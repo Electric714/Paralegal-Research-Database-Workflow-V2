@@ -6,7 +6,12 @@ import httpx
 
 from app.research.models import CompletenessStatus, IdentityStatus, SourceResultStatus
 from app.research.sources.base import ContractorContext
-from app.research.sources.osha import OshaEstablishmentSource, parse_inspection_detail, parse_search_page
+from app.research.sources.osha import (
+    OshaEstablishmentSource,
+    inspection_date_windows,
+    parse_inspection_detail,
+    parse_search_page,
+)
 
 
 SEARCH_HTML = """
@@ -16,7 +21,7 @@ SEARCH_HTML = """
 <table>
   <tr>
     <th></th><th>#</th><th>Activity</th><th>Date Opened</th><th>RID</th>
-    <th>State</th><th>Type</th><th>Scope</th><th>SIC</th><th>NAICS</th>
+    <th>ST</th><th>Type</th><th>Scope</th><th>SIC</th><th>NAICS</th>
     <th>Violations</th><th>Establishment Name</th>
   </tr>
   <tr>
@@ -42,7 +47,7 @@ NO_RESULTS_HTML = """
 <table>
   <tr>
     <th></th><th>#</th><th>Activity</th><th>Date Opened</th><th>RID</th>
-    <th>State</th><th>Type</th><th>Scope</th><th>SIC</th><th>NAICS</th>
+    <th>ST</th><th>Type</th><th>Scope</th><th>SIC</th><th>NAICS</th>
     <th>Violations</th><th>Establishment Name</th>
   </tr>
 </table>
@@ -73,7 +78,7 @@ def contractor() -> ContractorContext:
     )
 
 
-def test_search_page_parser_reads_osha_result_table():
+def test_search_page_parser_reads_current_osha_result_table_with_st_header():
     parsed = parse_search_page(SEARCH_HTML)
     assert parsed.table_found is True
     assert parsed.complete is True
@@ -83,6 +88,19 @@ def test_search_page_parser_reads_osha_result_table():
     assert parsed.rows[0].state == "WI"
     assert parsed.rows[0].establishment_name == '"C" Schlicht Plumbing, Inc.'
     assert parsed.rows[1].violations == "2"
+
+
+def test_historical_windows_cover_old_inspections_without_exceeding_ten_years():
+    reference = date(2026, 9, 21)
+    windows = inspection_date_windows(reference)
+    target = date(2014, 8, 18)
+
+    assert windows[0][1] == reference
+    assert windows[-1][0] == date(1972, 1, 1)
+    assert any(start <= target <= end for start, end in windows)
+    assert all(end.year - start.year <= 10 for start, end in windows)
+    for current, older in zip(windows, windows[1:]):
+        assert (current[0] - older[1]).days == 1
 
 
 def test_inspection_detail_parser_keeps_address_evidence():
