@@ -69,6 +69,7 @@ _COMPLAINT_12M_PATTERNS = (
     re.compile(r"\b([\d,]+)\s+complaints?\s+closed\s+in\s+the\s+last\s+12\s+months?\b", re.I),
     re.compile(r"\b([\d,]+)\s+closed\s+complaints?\s+in\s+the\s+last\s+12\s+months?\b", re.I),
 )
+_ZERO_COMPLAINTS_RE = re.compile(r"\bthis\s+business\s+has\s+0\s+complaints?\b", re.I)
 _RATING_RE = re.compile(r"\bBBB\s+Rating\s*:?\s*([A-F](?:[+-])?)", re.I)
 _CHALLENGE_RE = re.compile(
     r"(?:captcha|verify\s+(?:that\s+)?you\s+are\s+human|access\s+denied|cloudflare|"
@@ -431,23 +432,35 @@ def _complaint_summary_region(text: str) -> str:
     lower = text.casefold()
     starts = [lower.find(marker) for marker in _SUMMARY_START_MARKERS]
     starts = [index for index in starts if index >= 0]
-    if not starts:
-        return ""
-    start = min(starts)
+    if starts:
+        start = min(starts)
+        end = min(
+            [index for marker in _SUMMARY_END_MARKERS if (index := lower.find(marker, start + 1)) >= 0]
+            or [min(len(text), start + 1500)]
+        )
+        return text[start:end]
+
+    # BBB currently uses a compact zero-state on some complaint pages instead of
+    # rendering the Customer Complaints Summary heading. Accept only the exact
+    # zero-state phrase and only before any complaint-submission/narrative marker.
     end = min(
-        [index for marker in _SUMMARY_END_MARKERS if (index := lower.find(marker, start + 1)) >= 0]
-        or [min(len(text), start + 1500)]
+        [index for marker in _SUMMARY_END_MARKERS if (index := lower.find(marker)) >= 0]
+        or [min(len(text), 1500)]
     )
-    return text[start:end]
+    prefix = text[:end]
+    zero = _ZERO_COMPLAINTS_RE.search(prefix)
+    return zero.group(0) if zero else ""
 
 
 def parse_complaint_summary(html: str) -> tuple[int | None, int | None]:
-    """Parse only BBB's official complaint-summary block, never complaint prose."""
+    """Parse only BBB's official summary/zero-state, never complaint prose."""
     parser = _HtmlDocument()
     parser.feed(html)
     region = _complaint_summary_region(parser.visible_text)
     if not region:
         return None, None
+    if _ZERO_COMPLAINTS_RE.search(region):
+        return 0, None
 
     total = None
     closed_12 = None
@@ -517,8 +530,8 @@ def _hash_artifact(kind: str, url: str, text: str) -> RawArtifact:
 class BbbBusinessProfileSource(ResearchSource):
     source_key = "bbb"
     display_name = "Better Business Bureau"
-    adapter_version = "1.1.0"
-    parser_version = "1.1.0"
+    adapter_version = "1.1.1"
+    parser_version = "1.1.1"
 
     def __init__(
         self,
@@ -816,10 +829,6 @@ class BbbBusinessProfileSource(ResearchSource):
                 payload={"matched_profile": candidate.as_dict(), "cached_profile_used": cached_profile_used},
             )
 
-        # A positive is complete as soon as the verified profile reports one or
-        # more complaints. A zero is allowed to drive N only after the configured
-        # mapped discovery completed without gaps; direct cached-profile checks
-        # intentionally remain partial for zero results.
         complete = total > 0 or mapped_discovery_complete
         completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
         status = (
