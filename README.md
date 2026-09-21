@@ -54,7 +54,7 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
-- [ ] **Research Run Summary Dashboard** — show completed, no-match, ambiguous, partial, blocked, and failed counts together
+- [ ] **Research Run Summary Dashboard** — implementation complete on branch `feature/research-run-summary-dashboard`; persisted run reconciliation, source/bidder drill-down, source-owned-field change display, and safety tests added. Pending CI/manual verification and merge to `main`
 - [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
 - [ ] **Final Clean-Machine End-to-End Test** — install → import → research → review → approve/dismiss → export
 
