@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, research/wcrb-integration-spike]
 
 jobs:
   backend:
@@ -45,7 +45,7 @@ jobs:
         shell: powershell
         run: |
           $failed = $false
-          foreach ($script in @('scripts/start.ps1', 'scripts/stop.ps1')) {
+          foreach ($script in @('scripts/start.ps1', 'scripts/stop.ps1', 'scripts/WCRB_PROBE.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$tokens, [ref]$errors) | Out-Null
