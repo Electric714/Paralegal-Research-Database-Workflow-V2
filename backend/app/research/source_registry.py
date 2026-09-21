@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from .sources.base import ResearchSource
+from .sources.bbb import BbbBusinessProfileSource
 from .sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources.wdfi import WdfiCorporateRecordsSource
 
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
+    "bbb": BbbBusinessProfileSource,
     "sam": SamUploadedExclusionsSource,
     "wdfi": WdfiCorporateRecordsSource,
 }
