@@ -38,7 +38,7 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 - [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
-- [ ] **OSHA** — OSHA Establishment Search adapter is in PR #5 (`feature/osha-establishment-research`); merge/reconciliation and real bidder verification remain
+- [ ] **OSHA** — OSHA Establishment Search adapter from PR #5 is merged to `main`; CI passes and the source picker is ready. Final representative real-bidder/end-to-end verification remains before marking the source complete
 - [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau. Branch: `research/wcrb-integration-spike`. Playwright/Chromium acquisition spike in progress; normal same-origin Coverage Lookup POSTs are allowed. Intended owned fields: `wc`, `wc_date`
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated

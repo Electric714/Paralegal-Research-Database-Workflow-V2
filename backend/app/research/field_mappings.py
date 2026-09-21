@@ -17,8 +17,8 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "wdfi": SourceFieldMapping("wdfi", frozenset({"dfi"}), "Wisconsin DFI business-status field."),
     "osha": SourceFieldMapping(
         "osha",
-        frozenset({"osha", "osha_severe_violations", "years"}),
-        "OSHA enforcement/inspection fields from the bidder schema.",
+        frozenset({"osha"}),
+        "OSHA finding flag only; severe-violation and years semantics remain evidence-only pending firm confirmation.",
     ),
     "wcrb": SourceFieldMapping("wcrb", frozenset({"wc", "wc_date"}), "Workers-compensation fields."),
     "wcca": SourceFieldMapping(
