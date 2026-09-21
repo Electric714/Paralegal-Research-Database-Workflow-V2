@@ -69,7 +69,7 @@ def test_complete_dataset_no_match_is_clean_negative_but_never_proposes_n():
 
 
 def test_similar_name_requires_review():
-    body = CSV.replace("Acme Construction LLC", "Acme Construction Services LLC")
+    body = CSV.replace("Acme Construction LLC", "Acme Constrction LLC")
     result = source_for(body).search(contractor())
     assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
     assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
