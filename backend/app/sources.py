@@ -6,7 +6,7 @@ SOURCES = [
     {"key": "wcrb", "name": "Wisconsin Compensation Rating Bureau", "url": "https://www.wcrb.org/", "category": "Workers compensation", "status": "not_implemented"},
     {"key": "wcca", "name": "Wisconsin Circuit Court Access / CCAP", "url": "https://wcca.wicourts.gov/index.xsl", "category": "State court records", "status": "not_implemented"},
     {"key": "pacer", "name": "PACER", "url": "https://pacer.login.uscourts.gov/csologin/login.jsf", "category": "Federal court records", "status": "not_implemented"},
-    {"key": "sam", "name": "SAM.gov", "url": "https://sam.gov/entity-information", "category": "Federal exclusions / debarment", "status": "ready"},
+    {"key": "sam", "name": "SAM.gov", "url": "https://sam.gov/data-services/Exclusions/Public%20V2", "category": "Federal exclusions / debarment · Download the current Public V2 extract from the link below", "status": "ready"},
     {"key": "bbb", "name": "Better Business Bureau", "url": "https://www.bbb.org/", "category": "Business complaints", "status": "ready"},
     {"key": "violation_tracker", "name": "Violation Tracker", "url": "https://violationtracker.goodjobsfirst.org/", "category": "Enforcement / violations", "status": "not_implemented"},
     {"key": "wisdot", "name": "Wisconsin DOT Contractor Information", "url": "http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx", "category": "Contractor eligibility / debarment", "status": "not_implemented"},
