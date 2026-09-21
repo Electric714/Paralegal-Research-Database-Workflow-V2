@@ -37,6 +37,8 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 ### Ongoing
 
+- [x] **Research Run Summary Dashboard** — persisted run reconciliation with completed/no-match/ambiguous/partial/blocked/failed/not-checked counts, per-source and bidder × source drill-down, source-owned-field change display, integrity checks, and safety tests. Merged in PR #27; CI passed.
+
 - [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
 - [ ] **OSHA** — OSHA Establishment Search adapter from PR #5 is merged to `main`; CI passes and the source picker is ready. Final representative real-bidder/end-to-end verification remains before marking the source complete
@@ -50,7 +52,6 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
-- [ ] **Research Run Summary Dashboard** — implementation complete on branch `feature/research-run-summary-dashboard`; persisted run reconciliation, source/bidder drill-down, source-owned-field change display, and safety tests added. Pending CI/manual verification and merge to `main`
 - [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
