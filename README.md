@@ -43,13 +43,13 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
+- [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
 - [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
-- [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
