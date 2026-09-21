@@ -44,13 +44,13 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — use the official DOL Open Data Portal v4 API rather than scraping the retired enforcement-data site. DOL API accounts are free; the `/v4/datasets` catalog is keyless, while metadata/data requests require a private API key that must never be committed or logged. Phase 1 will target Wage and Hour Division enforcement/compliance data with conservative bidder identity matching. Branch: `feature/dol-enforcement-api`. Automatic field ownership remains disabled until the firm's semantics are confirmed; `prevailing_wage_violations` is the strongest candidate mapping for confirmed Davis-Bacon and Related Acts findings.
+- [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
 - [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
-- [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
