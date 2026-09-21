@@ -4,7 +4,7 @@ SOURCES = [
     {"key": "wdfi", "name": "Wisconsin Department of Financial Institutions", "url": "https://apps.dfi.wi.gov/apps/corpsearch/search.aspx", "category": "Business status", "status": "ready"},
     {"key": "osha", "name": "OSHA Establishment Search", "url": "https://www.osha.gov/ords/imis/establishment.html", "category": "Safety / enforcement", "status": "ready"},
     {"key": "wcrb", "name": "Wisconsin Compensation Rating Bureau", "url": "https://www.wcrb.org/", "category": "Workers compensation", "status": "not_implemented"},
-    {"key": "wcca", "name": "Wisconsin Circuit Court Access / CCAP", "url": "/wcca-workbench.html", "category": "State court records · operator-assisted WCCA", "status": "ready"},
+    {"key": "wcca", "name": "Wisconsin Circuit Court Access / CCAP", "url": "/wcca-workbench.html", "category": "State court records · operator-assisted · positive-only comparison", "status": "ready"},
     {"key": "pacer", "name": "PACER", "url": "https://pacer.login.uscourts.gov/csologin/login.jsf", "category": "Federal court records", "status": "not_implemented"},
     {"key": "sam", "name": "SAM.gov", "url": "https://sam.gov/data-services/Exclusions/Public%20V2", "category": "Federal exclusions / debarment · Download the current Public V2 extract from the link below", "status": "ready"},
     {"key": "bbb", "name": "Better Business Bureau", "url": "https://www.bbb.org/", "category": "Business complaints", "status": "ready"},
