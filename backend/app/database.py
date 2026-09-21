@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .research.persistence import apply_research_schema
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 IMPORT_DIR = DATA_DIR / "imports"
@@ -56,10 +58,12 @@ def init_db() -> None:
                 city TEXT,
                 state TEXT,
                 row_json TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(import_id) REFERENCES imports(id)
             );
             CREATE INDEX IF NOT EXISTS idx_bidders_name ON bidders(contractor_name);
             CREATE INDEX IF NOT EXISTS idx_bidders_external_id ON bidders(external_id);
+            CREATE INDEX IF NOT EXISTS idx_bidders_active ON bidders(active, contractor_name);
             CREATE TABLE IF NOT EXISTS research_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL,
@@ -97,6 +101,13 @@ def init_db() -> None:
             """
         )
 
+        bidder_columns = {row["name"] for row in conn.execute("PRAGMA table_info(bidders)").fetchall()}
+        if "active" not in bidder_columns:
+            conn.execute("ALTER TABLE bidders ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bidders_active ON bidders(active, contractor_name)")
+
+        apply_research_schema(conn)
+
 
 def add_diagnostic(severity: str, message: str, *, source_key: str | None = None, bidder_name: str | None = None, stage: str | None = None, details: dict | None = None) -> None:
     with connect() as conn:
@@ -114,10 +125,17 @@ def replace_master_database(filename: str, columns: list[str], rows: list[dict[s
             (filename, utcnow(), len(rows), json.dumps(columns), snapshot_path),
         )
         import_id = int(cur.lastrowid)
+
+        # Historical bidders stay in place so old evidence, judgments, and revisions
+        # remain auditable. Only the newest import is active for current research.
+        conn.execute("UPDATE bidders SET active = 0 WHERE active = 1")
         conn.execute("DELETE FROM review_proposals")
-        conn.execute("DELETE FROM bidders")
         conn.executemany(
-            "INSERT INTO bidders(import_id, external_id, contractor_name, related_companies, city, state, row_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO bidders(
+                import_id, external_id, contractor_name, related_companies, city, state, row_json, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            """,
             [(
                 import_id,
                 row.get("id", ""),
@@ -143,10 +161,10 @@ def active_import() -> dict | None:
 
 def list_bidders(search: str = "", limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
     search = search.strip()
-    where = ""
+    where = "WHERE active = 1"
     params: list[object] = []
     if search:
-        where = "WHERE contractor_name LIKE ? OR related_companies LIKE ? OR external_id LIKE ? OR city LIKE ? OR state LIKE ?"
+        where += " AND (contractor_name LIKE ? OR related_companies LIKE ? OR external_id LIKE ? OR city LIKE ? OR state LIKE ?)"
         q = f"%{search}%"
         params.extend([q, q, q, q, q])
     with connect() as conn:
@@ -165,33 +183,59 @@ def list_bidders(search: str = "", limit: int = 100, offset: int = 0) -> tuple[l
 
 def get_bidder(bidder_id: int) -> dict | None:
     with connect() as conn:
-        row = conn.execute("SELECT id, row_json FROM bidders WHERE id = ?", (bidder_id,)).fetchone()
+        row = conn.execute("SELECT id, row_json, active FROM bidders WHERE id = ?", (bidder_id,)).fetchone()
         if not row:
             return None
         item = json.loads(row["row_json"])
         item["_internal_id"] = row["id"]
+        item["_active"] = bool(row["active"])
         return item
 
 
 def all_bidder_rows() -> list[dict[str, str]]:
     with connect() as conn:
-        return [json.loads(row["row_json"]) for row in conn.execute("SELECT row_json FROM bidders ORDER BY id").fetchall()]
+        return [
+            json.loads(row["row_json"])
+            for row in conn.execute("SELECT row_json FROM bidders WHERE active = 1 ORDER BY id").fetchall()
+        ]
+
+
+def active_bidder_ids() -> list[int]:
+    with connect() as conn:
+        return [int(row["id"]) for row in conn.execute("SELECT id FROM bidders WHERE active = 1 ORDER BY id").fetchall()]
 
 
 def count_bidders() -> int:
     with connect() as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM bidders").fetchone()[0])
+        return int(conn.execute("SELECT COUNT(*) FROM bidders WHERE active = 1").fetchone()[0])
 
 
 def create_run(bidder_ids: list[int] | None, source_keys: list[str], bidder_count: int) -> dict:
+    resolved_bidder_ids = bidder_ids or active_bidder_ids()
     scope = {"type": "selected" if bidder_ids else "all", "bidder_ids": bidder_ids or []}
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO research_runs(status, created_at, bidder_scope_json, source_keys_json, bidder_count, source_count, message) VALUES ('planned', ?, ?, ?, ?, ?, ?)",
-            (utcnow(), json.dumps(scope), json.dumps(source_keys), bidder_count, len(source_keys), "Research framework ready; source collectors are not implemented yet."),
+            (
+                utcnow(),
+                json.dumps(scope),
+                json.dumps(source_keys),
+                bidder_count,
+                len(source_keys),
+                "Research run planned; source tasks created and waiting for adapters.",
+            ),
         )
         run_id = int(cur.lastrowid)
-    add_diagnostic("INFO", "Research run created", stage="research", details={"run_id": run_id, "sources": source_keys, "bidder_count": bidder_count})
+
+    from .research.service import create_tasks_for_run
+
+    task_count = create_tasks_for_run(run_id, resolved_bidder_ids, source_keys)
+    add_diagnostic(
+        "INFO",
+        "Research run created",
+        stage="research",
+        details={"run_id": run_id, "sources": source_keys, "bidder_count": bidder_count, "task_count": task_count},
+    )
     return get_run(run_id)
 
 
@@ -204,7 +248,10 @@ def _run_row(row: sqlite3.Row) -> dict:
 
 def get_run(run_id: int) -> dict:
     with connect() as conn:
-        return _run_row(conn.execute("SELECT * FROM research_runs WHERE id = ?", (run_id,)).fetchone())
+        row = conn.execute("SELECT * FROM research_runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Research run {run_id} does not exist.")
+        return _run_row(row)
 
 
 def list_runs(limit: int = 50) -> list[dict]:
@@ -214,13 +261,17 @@ def list_runs(limit: int = 50) -> list[dict]:
 
 def list_review_proposals() -> list[dict]:
     with connect() as conn:
-        rows = conn.execute("SELECT rp.*, b.contractor_name FROM review_proposals rp JOIN bidders b ON b.id = rp.bidder_id ORDER BY rp.id DESC").fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["evidence"] = json.loads(item.pop("evidence_json"))
-            result.append(item)
-        return result
+        rows = conn.execute(
+            """
+            SELECT pc.*, b.contractor_name, es.source_url, es.identity_status,
+                   es.completeness_status, es.result_status
+            FROM proposed_changes pc
+            JOIN bidders b ON b.id = pc.bidder_id
+            JOIN evidence_snapshots es ON es.id = pc.evidence_snapshot_id
+            ORDER BY pc.id DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def list_diagnostics(limit: int = 500) -> list[dict]:
