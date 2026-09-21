@@ -16,7 +16,67 @@ Use **`STOP_HERE.bat`** to stop the hidden local application process.
 
 Downloaded runtimes live under `.runtime/`, the Python environment lives under `.venv/`, and both are ignored by Git. The first launch requires internet access; later launches reuse the local runtimes.
 
-For this milestone, the 14 research sources are intentionally present as **Not Implemented**. The current build is for validating the application shell, bidder CSV import/export, database browsing, research-run setup, review workflow scaffolding, source catalog, and diagnostics before implementing the external sources one at a time.
+## Project Completion Checklist / Agent Coordination Board
+
+This is the shared project map for humans and coding agents. Update this section whenever work starts, finishes, becomes blocked, or moves back into active development.
+
+A task belongs under **Completed** only when the relevant work is merged to `main`, tests pass, and the basic workflow has been manually verified. Move a task from **To Do** to **Ongoing** before beginning substantial work and include the branch or PR when one exists.
+
+### Completed
+
+- [x] **UI / App Shell** — Windows one-click launcher and local application shell
+- [x] **Database Import / Export** — bidder CSV import/export with complete imported-row preservation
+- [x] **Bidder Database / Record Handling** — stable bidder identity, import validation, and complete bidder records
+- [x] **Research Backend Foundation** — bidder × source research tasks with explicit result/completeness states
+- [x] **Evidence / Provenance System** — research evidence stored separately from the approved master database
+- [x] **Identity Matching System** — conservative contractor matching with remembered SAME_ENTITY / DIFFERENT_ENTITY judgments
+- [x] **Approve / Dismiss Review Workflow** — proposed changes require human approval before modifying master data
+- [x] **Audit / Revision History** — master revisions and audit events retained
+- [x] **Automated Backend Testing / CI** — fixture-test pattern and pytest CI coverage for the research foundation
+
+### Ongoing
+
+- [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
+- [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
+- [ ] **OSHA** — OSHA Establishment Search adapter is in PR #5 (`feature/osha-establishment-research`); merge/reconciliation and real bidder verification remain
+- [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
+- [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
+
+### To Do
+
+- [ ] **WCRB — Next Site** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
+- [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
+- [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
+- [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
+- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
+- [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
+- [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
+- [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
+- [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
+- [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
+- [ ] **Research Run Summary Dashboard** — show completed, no-match, ambiguous, partial, blocked, and failed counts together
+- [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
+- [ ] **Final Clean-Machine End-to-End Test** — install → import → research → review → approve/dismiss → export
+
+### Source Completion Gates
+
+A source moves from **Ongoing** to **Completed** only when all applicable gates are satisfied:
+
+1. Acquisition method is source-specific, documented, and uses the most reliable available official/public path rather than forcing a generic scraper.
+2. Research scope is limited to contractors already present in the approved bidder database plus explicitly stored related-company aliases.
+3. Source adapter is registered in the common research pipeline and reports explicit success/no-match/ambiguous/partial/blocked/failed states.
+4. Parser or dataset loader validates the expected layout and fails visibly when the source changes.
+5. Identity matching is conservative; ambiguous matches require human review and cannot automatically change master data.
+6. Useful evidence keeps source provenance, retrieval time, searched contractor, source record/details, and raw-artifact/hash information when practical.
+7. A clean negative is produced only when the source check is complete enough to support it. Blocked, stale, partial, failed, or ambiguous checks never become false negatives.
+8. Source-to-field ownership is explicitly confirmed. A source may collect useful evidence without being allowed to propose a master-field change.
+9. Offline fixtures cover normal parsing, positive match, no-match, ambiguity, and at least the major expected failure/partial cases.
+10. The source has been manually tested with representative real bidder records, including at least one likely match and one no-match where practical.
+11. Changes are merged to `main`, CI passes, and the application/source picker reports the source as ready only after the implementation is actually present on `main`.
+
+### Recommended Implementation Order
+
+Finish and verify the four active source tracks first: **SAM.gov → OSHA → WDFI → BBB**. After those are stable, implement **WCRB** next because it has a narrow, already-defined field scope (`wc`, `wc_date`) and fits the source-specific adapter pattern cleanly. Then proceed to **WCCA/CCAP**, followed by structured enforcement/debarment datasets such as **Violation Tracker, Wisconsin DOT, DOL Enforcement, Minnesota Debarment, and Minnesota PCA**. Leave **PACER** until the authenticated-access and cost/session model is explicitly designed rather than bolting login automation onto the general scraper pipeline.
 
 ## Project Goal
 
