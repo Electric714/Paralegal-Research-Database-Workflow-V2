@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.research.field_mappings import source_owns_field
 from app.research.sources.wcrb_browser import (
     _redact_hidden_input_values,
     _safe_request_url,
@@ -118,3 +119,8 @@ def test_unquoted_hidden_input_value_is_redacted():
     sanitized = _redact_hidden_input_values(html)
     assert "abc123" not in sanitized
     assert '[redacted]' in sanitized
+
+
+def test_wcrb_can_own_wc_but_not_wc_date_until_semantics_are_confirmed():
+    assert source_owns_field("wcrb", "wc") is True
+    assert source_owns_field("wcrb", "wc_date") is False
