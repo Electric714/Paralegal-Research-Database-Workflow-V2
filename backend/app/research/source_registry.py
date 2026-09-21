@@ -4,6 +4,7 @@ from .sources.base import ResearchSource
 from .sources.bbb import BbbBusinessProfileSource
 from .sources.dol_enforcement import DolEnforcementSource
 from .sources.mn_debarment import MinnesotaDebarredVendorsSource
+from .sources.mn_pca import MinnesotaPcaEnforcementSource
 from .sources.osha import OshaEstablishmentSource
 from .sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources.violation_tracker import ViolationTrackerSource
@@ -16,6 +17,7 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "bbb": BbbBusinessProfileSource,
     "dol_enforcement": DolEnforcementSource,
     "mn_debarment": MinnesotaDebarredVendorsSource,
+    "mn_pca": MinnesotaPcaEnforcementSource,
     "osha": OshaEstablishmentSource,
     "sam": SamUploadedExclusionsSource,
     "violation_tracker": ViolationTrackerSource,
