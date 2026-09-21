@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.research.sources.wcrb_browser import browser_request_decision
+from app.research.sources.wcrb_browser import (
+    _redact_hidden_input_values,
+    _safe_request_url,
+    browser_request_decision,
+)
 
 
 def test_wcrb_coverage_lookup_post_is_allowed():
@@ -42,6 +46,26 @@ def test_unrelated_wcrb_post_is_blocked():
     assert decision.reason == "unexpected_wcrb_method_or_path"
 
 
+def test_similar_but_wrong_wcrb_path_post_is_blocked():
+    decision = browser_request_decision(
+        "POST",
+        "https://www.wcrb.org/coverage-lookup-malicious",
+        resource_type="document",
+    )
+    assert decision.allowed is False
+    assert decision.reason == "unexpected_wcrb_method_or_path"
+
+
+def test_wcrb_http_downgrade_is_blocked():
+    decision = browser_request_decision(
+        "GET",
+        "http://www.wcrb.org/coverage-lookup/",
+        resource_type="document",
+    )
+    assert decision.allowed is False
+    assert decision.reason == "https_required"
+
+
 def test_wcrb_script_resources_are_allowed():
     decision = browser_request_decision(
         "GET",
@@ -64,3 +88,33 @@ def test_required_jsdelivr_static_assets_are_allowed_read_only():
     )
     assert read.allowed is True
     assert write.allowed is False
+
+
+def test_request_log_url_drops_query_and_fragment_values():
+    safe = _safe_request_url(
+        "https://www.wcrb.org/coverage-lookup/Default.aspx?token=secret&x=1#fragment"
+    )
+    assert safe == "https://www.wcrb.org/coverage-lookup/Default.aspx"
+    assert "secret" not in safe
+
+
+def test_hidden_input_values_are_redacted_from_saved_html():
+    html = """
+    <html><body>
+      <input type="hidden" name="__VIEWSTATE" value="very-secret-view-state" />
+      <input value='another-secret' id='ctl00_NoBot1_NoBot1_ClientState' type='hidden'>
+      <input type="text" name="employer" value="VISIBLE COMPANY NAME" />
+    </body></html>
+    """
+    sanitized = _redact_hidden_input_values(html)
+    assert "very-secret-view-state" not in sanitized
+    assert "another-secret" not in sanitized
+    assert sanitized.count('[redacted]') == 2
+    assert "VISIBLE COMPANY NAME" in sanitized
+
+
+def test_unquoted_hidden_input_value_is_redacted():
+    html = '<input type=hidden name=__EVENTVALIDATION value=abc123>'
+    sanitized = _redact_hidden_input_values(html)
+    assert "abc123" not in sanitized
+    assert '[redacted]' in sanitized
