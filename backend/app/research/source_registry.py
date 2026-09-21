@@ -7,6 +7,7 @@ from .sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources.violation_tracker import ViolationTrackerSource
 from .sources.wcca import WccaOperatorAssistedSource
 from .sources.wdfi import WdfiCorporateRecordsSource
+from .sources.wisdot import WisdotContractorSource
 
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
@@ -16,6 +17,7 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "violation_tracker": ViolationTrackerSource,
     "wcca": WccaOperatorAssistedSource,
     "wdfi": WdfiCorporateRecordsSource,
+    "wisdot": WisdotContractorSource,
 }
 
 
