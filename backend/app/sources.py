@@ -7,7 +7,7 @@ SOURCES = [
     {"key": "wcca", "name": "Wisconsin Circuit Court Access / CCAP", "url": "https://wcca.wicourts.gov/index.xsl", "category": "State court records", "status": "not_implemented"},
     {"key": "pacer", "name": "PACER", "url": "https://pacer.login.uscourts.gov/csologin/login.jsf", "category": "Federal court records", "status": "not_implemented"},
     {"key": "sam", "name": "SAM.gov", "url": "https://sam.gov/entity-information", "category": "Federal exclusions / debarment", "status": "ready"},
-    {"key": "bbb", "name": "Better Business Bureau", "url": "http://www.bbb.org/wisconsin", "category": "Business complaints", "status": "not_implemented"},
+    {"key": "bbb", "name": "Better Business Bureau", "url": "https://www.bbb.org/", "category": "Business complaints", "status": "ready"},
     {"key": "violation_tracker", "name": "Violation Tracker", "url": "https://violationtracker.goodjobsfirst.org/", "category": "Enforcement / violations", "status": "not_implemented"},
     {"key": "wisdot", "name": "Wisconsin DOT Contractor Information", "url": "http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx", "category": "Contractor eligibility / debarment", "status": "not_implemented"},
     {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://enforcedata.dol.gov/views/data_catalogs.php", "category": "Labor enforcement", "status": "not_implemented"},
