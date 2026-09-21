@@ -23,6 +23,11 @@ def _contractor_context(bidder_id: int) -> ContractorContext:
         city=str(bidder.get("city", "")),
         state=str(bidder.get("state", "")),
         zip=str(bidder.get("zip", "")),
+        additional_address=str(bidder.get("additional_address", "")),
+        additional_address_city=str(bidder.get("additional_address_city", "")),
+        additional_address_state=str(bidder.get("additional_address_state", "")),
+        additional_address_zip=str(bidder.get("additional_address_zip", "")),
+        dfi=str(bidder.get("dfi", "")),
     )
 
 
