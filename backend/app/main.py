@@ -22,9 +22,9 @@ from .research.service import list_tasks, record_identity_judgment, review_chang
 from .research.sources.sam_exclusions import (
     MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
     SamExtractError,
-    SamExclusionsSource,
     store_uploaded_extract,
 )
+from .research.sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources import SOURCES, SOURCE_KEYS
 
 APP_NAME = "Paralegal Research Desk"
@@ -39,7 +39,7 @@ EXPECTED_COLUMNS = [
     "dwd_substance_abuse_plan", "better_business_bureau_complaints", "misc_violations", "tax_liability",
 ]
 
-app = FastAPI(title=APP_NAME, version="0.3.0")
+app = FastAPI(title=APP_NAME, version="0.3.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -133,9 +133,18 @@ def _validate_import(columns: list[str], rows: list[dict[str, str]]) -> Validati
     return report
 
 
+def _compare_uploaded_sam_extract() -> dict | None:
+    """Run SAM against the complete active master immediately after an upload."""
+    bidder_count = db.count_bidders()
+    if bidder_count == 0:
+        return None
+    run = db.create_run(None, ["sam"], bidder_count)
+    return execute_research_run(run["id"])
+
+
 @app.get("/api/health")
 def health():
-    return {"name": APP_NAME, "status": "ok", "version": "0.3.0"}
+    return {"name": APP_NAME, "status": "ok", "version": "0.3.1"}
 
 
 @app.get("/api/schema")
@@ -177,7 +186,7 @@ def sources():
 @app.get("/api/sources/sam/status")
 def sam_status():
     try:
-        return {"item": SamExclusionsSource().health_check()}
+        return {"item": SamUploadedExclusionsSource().health_check()}
     except Exception as exc:
         raise HTTPException(500, f"Unable to inspect SAM source status: {exc}") from exc
 
@@ -189,11 +198,12 @@ async def upload_sam_extract(file: UploadFile = File(...)):
         raise HTTPException(422, "The SAM extract is empty.")
     if len(data) > SAM_MAX_EXTRACT_BYTES:
         raise HTTPException(413, "The SAM extract exceeds the configured size limit.")
-    filename = Path(file.filename or "sam_exclusions.zip").name
+    filename = Path(file.filename or "sam_exclusions.csv").name
     try:
         dataset = store_uploaded_extract(data, filename)
     except SamExtractError as exc:
         raise HTTPException(422, str(exc)) from exc
+
     db.add_diagnostic(
         "INFO",
         "SAM exclusions extract loaded",
@@ -205,8 +215,26 @@ async def upload_sam_extract(file: UploadFile = File(...)):
             "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
             "record_count": len(dataset.records),
             "sha256": dataset.sha256,
+            "acquisition_mode": "manual_upload",
         },
     )
+
+    comparison = _compare_uploaded_sam_extract()
+    if comparison:
+        db.add_diagnostic(
+            "INFO",
+            "Uploaded SAM extract compared against approved bidder database",
+            source_key="sam",
+            stage="research",
+            details={
+                "run_id": comparison["run"]["id"],
+                "bidder_count": comparison["run"]["bidder_count"],
+                "executed": comparison["executed"],
+                "proposal_count": comparison["proposal_count"],
+                "status_counts": comparison["status_counts"],
+            },
+        )
+
     return {
         "item": {
             "filename": dataset.path.name,
@@ -214,7 +242,14 @@ async def upload_sam_extract(file: UploadFile = File(...)):
             "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
             "record_count": len(dataset.records),
             "sha256": dataset.sha256,
-        }
+            "acquisition_mode": "manual_upload",
+        },
+        "comparison": comparison,
+        "message": (
+            "SAM extract uploaded and compared against the approved bidder database."
+            if comparison
+            else "SAM extract uploaded. Import the bidder database to run the comparison."
+        ),
     }
 
 
