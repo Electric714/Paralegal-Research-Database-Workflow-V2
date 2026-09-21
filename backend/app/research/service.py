@@ -5,8 +5,14 @@ from typing import Any
 
 from .. import database as db
 from .field_mappings import source_owns_field
-from .models import CompletenessStatus, IdentityStatus, SourceResult
+from .models import CompletenessStatus, IdentityStatus, SourceResult, SourceResultStatus
 from .persistence import add_audit_event, utcnow
+
+
+PROPOSAL_ELIGIBLE_STATUSES = {
+    SourceResultStatus.SUCCESS_COMPLETE,
+    SourceResultStatus.SUCCESS_WITH_FINDINGS,
+}
 
 
 def create_tasks_for_run(research_run_id: int, bidder_ids: list[int], source_keys: list[str]) -> int:
@@ -186,6 +192,7 @@ def persist_source_result(task_id: int, result: SourceResult) -> dict[str, Any]:
             comparable = (
                 bool(observed)
                 and source_owns_field(result.source_key, evidence.field_name)
+                and result.status in PROPOSAL_ELIGIBLE_STATUSES
                 and result.identity_status == IdentityStatus.CONFIRMED
                 and result.completeness_status == CompletenessStatus.COMPLETE
             )
