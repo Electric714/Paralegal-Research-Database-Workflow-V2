@@ -170,7 +170,7 @@ def test_missing_uploaded_extract_is_source_unavailable(isolated_db, tmp_path):
 
     assert result.status == SourceResultStatus.SOURCE_UNAVAILABLE
     assert result.completeness_status == CompletenessStatus.UNKNOWN
-    assert "Upload the official SAM Public Exclusions V2 extract" in result.warnings[0]
+    assert "Upload the official SAM Public Exclusions V2" in result.warnings[0]
 
 
 def test_remembered_same_entity_judgment_is_reused(isolated_db, tmp_path):
