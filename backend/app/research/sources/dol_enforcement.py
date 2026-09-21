@@ -106,24 +106,25 @@ class ScoredRow:
 
 
 def _aliases(contractor: ContractorContext) -> list[str]:
-    raw = [contractor.contractor_name]
-    raw.extend(
+    raw_names = [contractor.contractor_name]
+    raw_names.extend(
         part.strip()
         for part in re.split(r"[;|\n]+", contractor.related_companies or "")
         if part.strip()
     )
+
     variants: list[str] = []
     seen: set[str] = set()
-    for name in raw:
-        for value in (name.strip(), normalize_company_name(name)):
-            key = normalize_text(value)
+    for raw_name in raw_names:
+        for candidate in (raw_name.strip(), normalize_company_name(raw_name)):
+            key = normalize_text(candidate)
             if not key or key in seen:
                 continue
-            # Avoid broad API queries such as "construction" by itself.
+            # Never turn a generic short word into a national API search.
             if len(key.split()) == 1 and len(key) < 8:
                 continue
             seen.add(key)
-            variants.append(value)
+            variants.append(candidate)
             if len(variants) >= MAX_QUERY_VARIANTS:
                 return variants
     return variants
@@ -140,9 +141,14 @@ def _identity_names(contractor: ContractorContext) -> list[str]:
 
 
 def _dataset_score(item: dict[str, Any]) -> int:
-    agency = str((item.get("agency") or {}).get("abbr") or item.get("agency_abbr") or "").upper()
+    agency_value = item.get("agency")
+    agency = ""
+    if isinstance(agency_value, dict):
+        agency = str(agency_value.get("abbr") or "")
+    agency = str(item.get("agency_abbr") or agency).upper().strip()
     if agency != "WHD":
         return -1
+
     text = normalize_text(f"{item.get('name', '')} {item.get('description', '')}")
     score = 0
     if "compliance" in text:
@@ -171,17 +177,22 @@ def _extract_rows(payload: Any) -> list[dict[str, Any]]:
 def _extract_total(payload: Any) -> int | None:
     if not isinstance(payload, dict):
         return None
-    containers = [payload, payload.get("meta"), payload.get("metadata"), payload.get("pagination")]
-    for container in containers:
+    for container in (
+        payload,
+        payload.get("meta"),
+        payload.get("metadata"),
+        payload.get("pagination"),
+    ):
         if not isinstance(container, dict):
             continue
         for key in ("total_count", "total", "count", "record_count"):
             value = container.get(key)
-            try:
-                if value is not None:
-                    return int(value)
-            except (TypeError, ValueError):
+            if value is None:
                 continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
     return None
 
 
@@ -191,21 +202,19 @@ def _extract_metadata_fields(payload: Any) -> set[str]:
     def walk(value: Any) -> None:
         if isinstance(value, dict):
             for key, nested in value.items():
-                key_norm = normalize_text(str(key)).replace(" ", "_")
-                if key_norm in {
-                    "name",
-                    "column_name",
-                    "field_name",
-                    "api_name",
-                    "variable_name",
-                } and isinstance(nested, str):
-                    candidate = nested.strip()
-                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
-                        fields.add(candidate)
-                if key_norm in {"fields", "columns", "variables"} and isinstance(nested, dict):
+                normalized_key = normalize_text(str(key)).replace(" ", "_")
+                if (
+                    normalized_key
+                    in {"name", "column_name", "field_name", "api_name", "variable_name"}
+                    and isinstance(nested, str)
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", nested.strip())
+                ):
+                    fields.add(nested.strip())
+                if normalized_key in {"fields", "columns", "variables"} and isinstance(nested, dict):
                     for candidate in nested:
-                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(candidate)):
-                            fields.add(str(candidate))
+                        candidate_text = str(candidate)
+                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate_text):
+                            fields.add(candidate_text)
                 walk(nested)
         elif isinstance(value, list):
             for nested in value:
@@ -218,21 +227,21 @@ def _extract_metadata_fields(payload: Any) -> set[str]:
 def _resolve_one(fields: set[str], candidates: tuple[str, ...]) -> str | None:
     lowered = {field.casefold(): field for field in fields}
     for candidate in candidates:
-        if candidate.casefold() in lowered:
-            return lowered[candidate.casefold()]
+        resolved = lowered.get(candidate.casefold())
+        if resolved:
+            return resolved
     return None
 
 
 def _resolve_schema(fields: set[str]) -> ResolvedSchema:
     lowered = {field.casefold(): field for field in fields}
-    name_fields = tuple(
-        lowered[candidate.casefold()]
-        for candidate in NAME_FIELD_CANDIDATES
-        if candidate.casefold() in lowered
-    )
     return ResolvedSchema(
         fields=frozenset(fields),
-        name_fields=name_fields,
+        name_fields=tuple(
+            lowered[candidate.casefold()]
+            for candidate in NAME_FIELD_CANDIDATES
+            if candidate.casefold() in lowered
+        ),
         address_field=_resolve_one(fields, ADDRESS_FIELD_CANDIDATES),
         city_field=_resolve_one(fields, CITY_FIELD_CANDIDATES),
         state_field=_resolve_one(fields, STATE_FIELD_CANDIDATES),
@@ -277,9 +286,7 @@ def _violation_counts(row: dict[str, Any]) -> dict[str, float]:
     counts: dict[str, float] = {}
     for key, value in row.items():
         normalized = key.casefold()
-        if "viol" not in normalized:
-            continue
-        if not ("cnt" in normalized or "count" in normalized):
+        if "viol" not in normalized or ("cnt" not in normalized and "count" not in normalized):
             continue
         count = _number(value)
         if count > 0:
@@ -300,9 +307,8 @@ def _filter_object(name: str, schema: ResolvedSchema, state: str) -> dict[str, A
         {"field": field, "operator": "like", "value": f"%{name}%"}
         for field in schema.name_fields
     ]
-    name_filter: dict[str, Any]
     if len(name_conditions) == 1:
-        name_filter = name_conditions[0]
+        name_filter: dict[str, Any] = name_conditions[0]
     else:
         name_filter = {"or": name_conditions}
 
@@ -316,7 +322,11 @@ def _filter_object(name: str, schema: ResolvedSchema, state: str) -> dict[str, A
     return name_filter
 
 
-def _score_row(contractor: ContractorContext, row: dict[str, Any], schema: ResolvedSchema) -> ScoredRow:
+def _score_row(
+    contractor: ContractorContext,
+    row: dict[str, Any],
+    schema: ResolvedSchema,
+) -> ScoredRow:
     candidate_name = _row_name(row, schema)
     candidate_address = _safe_string(row, schema.address_field)
     candidate_city = _safe_string(row, schema.city_field)
@@ -341,13 +351,13 @@ def _score_row(contractor: ContractorContext, row: dict[str, Any], schema: Resol
             best_identity = identity
 
     if best is None:
-        best = score_candidate(master_name=contractor.contractor_name, candidate_name=candidate_name)
+        best = score_candidate(
+            master_name=contractor.contractor_name,
+            candidate_name=candidate_name,
+        )
 
     master_zip = re.sub(r"\D", "", contractor.zip or "")[:5]
-    row_zip = re.sub(r"\D", "", candidate_zip)[:5]
-    zip_match = bool(master_zip and row_zip and master_zip == row_zip)
-    exact_name = normalize_company_name(best_identity) == normalize_company_name(candidate_name)
-
+    candidate_zip_digits = re.sub(r"\D", "", candidate_zip)[:5]
     return ScoredRow(
         row=row,
         candidate_name=candidate_name,
@@ -357,9 +367,19 @@ def _score_row(contractor: ContractorContext, row: dict[str, Any], schema: Resol
         address_score=best.address_score,
         city_score=best.city_score,
         state_score=best.state_score,
-        zip_match=zip_match,
-        exact_name=exact_name,
+        zip_match=bool(master_zip and candidate_zip_digits and master_zip == candidate_zip_digits),
+        exact_name=(
+            normalize_company_name(best_identity) == normalize_company_name(candidate_name)
+        ),
     )
+
+
+def _is_plausible(candidate: ScoredRow) -> bool:
+    # An exact normalized name remains review-worthy even when location conflicts.
+    # Dropping it here would incorrectly turn a conflicting identity into a clean no-match.
+    if candidate.exact_name:
+        return True
+    return candidate.name_score >= 0.75 and candidate.score >= 0.78
 
 
 def _auto_confirm(contractor: ContractorContext, candidate: ScoredRow) -> bool:
@@ -386,7 +406,7 @@ def _auto_confirm(contractor: ContractorContext, candidate: ScoredRow) -> bool:
 class DolEnforcementSource(ResearchSource):
     source_key = "dol_enforcement"
     display_name = "U.S. Department of Labor Enforcement Data"
-    adapter_version = "0.1.0"
+    adapter_version = "0.1.1"
     parser_version = "0.1.0"
 
     def __init__(
@@ -395,7 +415,9 @@ class DolEnforcementSource(ResearchSource):
         client: httpx.Client | None = None,
         api_key: str | None = None,
     ) -> None:
-        self.api_key = (api_key if api_key is not None else os.getenv(DOL_API_KEY_ENV, "")).strip()
+        self.api_key = (
+            api_key if api_key is not None else os.getenv(DOL_API_KEY_ENV, "")
+        ).strip()
         self.client = client or httpx.Client(
             timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=True,
@@ -430,14 +452,16 @@ class DolEnforcementSource(ResearchSource):
                     f"Set {DOL_API_KEY_ENV} to use DOL metadata/data endpoints.",
                     status=SourceResultStatus.AUTH_REQUIRED,
                 )
-            # DOL's v4 guide documents X-API-KEY as a request parameter. Never retain
-            # the resulting request URL because it contains the secret.
+            # The DOL v4 guide documents X-API-KEY as a request parameter. Never
+            # persist response.request.url because that URL contains the secret.
             request_params["X-API-KEY"] = self.api_key
+
         try:
             response = self.client.get(url, params=request_params)
         except httpx.TimeoutException as exc:
             raise DolFetchError(
-                "The DOL API request timed out.", status=SourceResultStatus.TIMEOUT
+                "The DOL API request timed out.",
+                status=SourceResultStatus.TIMEOUT,
             ) from exc
         except httpx.HTTPError as exc:
             raise DolFetchError(
@@ -469,6 +493,7 @@ class DolEnforcementSource(ResearchSource):
                 status=SourceResultStatus.HTTP_ERROR,
                 http_status=response.status_code,
             )
+
         try:
             return response.json(), response.status_code
         except ValueError as exc:
@@ -481,6 +506,7 @@ class DolEnforcementSource(ResearchSource):
     def _discover_dataset(self) -> DolDataset:
         if self._dataset is not None:
             return self._dataset
+
         best_item: dict[str, Any] | None = None
         best_score = -1
         page = 1
@@ -491,6 +517,7 @@ class DolEnforcementSource(ResearchSource):
                     "The DOL dataset catalog response did not match the documented structure.",
                     status=SourceResultStatus.LAYOUT_CHANGED,
                 )
+
             for item in payload["datasets"]:
                 if not isinstance(item, dict):
                     continue
@@ -498,11 +525,18 @@ class DolEnforcementSource(ResearchSource):
                 if score > best_score:
                     best_score = score
                     best_item = item
+
             meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
             next_page = meta.get("next_page")
             if not next_page:
                 break
-            page = int(next_page)
+            try:
+                page = int(next_page)
+            except (TypeError, ValueError) as exc:
+                raise DolFetchError(
+                    "The DOL dataset catalog returned an invalid next-page value.",
+                    status=SourceResultStatus.DATASET_MALFORMED,
+                ) from exc
         else:
             raise DolFetchError(
                 "DOL dataset-catalog pagination exceeded the safety limit.",
@@ -514,13 +548,18 @@ class DolEnforcementSource(ResearchSource):
                 "A WHD compliance/enforcement dataset could not be found in the DOL v4 catalog.",
                 status=SourceResultStatus.SOURCE_UNAVAILABLE,
             )
-        agency = str((best_item.get("agency") or {}).get("abbr") or "").strip()
+
+        agency_value = best_item.get("agency")
+        agency = ""
+        if isinstance(agency_value, dict):
+            agency = str(agency_value.get("abbr") or "").strip()
         endpoint = str(best_item.get("api_url") or "").strip()
         if not agency or not endpoint:
             raise DolFetchError(
                 "The selected DOL dataset is missing its agency or API endpoint metadata.",
                 status=SourceResultStatus.DATASET_MALFORMED,
             )
+
         self._dataset = DolDataset(
             agency=agency,
             endpoint=endpoint,
@@ -533,8 +572,7 @@ class DolEnforcementSource(ResearchSource):
         if self._schema is not None:
             return self._schema
         payload, _ = self._get_json(dataset.metadata_url, authenticated=True)
-        fields = _extract_metadata_fields(payload)
-        schema = _resolve_schema(fields)
+        schema = _resolve_schema(_extract_metadata_fields(payload))
         if not schema.name_fields:
             raise DolFetchError(
                 "DOL WHD metadata did not expose a recognized employer-name field.",
@@ -553,19 +591,21 @@ class DolEnforcementSource(ResearchSource):
         rows: list[dict[str, Any]] = []
         attempts: list[dict[str, Any]] = []
         offset = 0
-        complete = True
         last_http_status: int | None = None
+
         for _ in range(DATA_PAGE_LIMIT):
-            params = {
-                "limit": DATA_PAGE_SIZE,
-                "offset": offset,
-                "filter_object": json.dumps(
-                    _filter_object(name, schema, state),
-                    separators=(",", ":"),
-                ),
-            }
-            payload, status = self._get_json(dataset.data_url, params=params, authenticated=True)
-            last_http_status = status
+            payload, last_http_status = self._get_json(
+                dataset.data_url,
+                params={
+                    "limit": DATA_PAGE_SIZE,
+                    "offset": offset,
+                    "filter_object": json.dumps(
+                        _filter_object(name, schema, state),
+                        separators=(",", ":"),
+                    ),
+                },
+                authenticated=True,
+            )
             page_rows = _extract_rows(payload)
             total = _extract_total(payload)
             attempts.append(
@@ -580,18 +620,21 @@ class DolEnforcementSource(ResearchSource):
             )
             rows.extend(page_rows)
             offset += len(page_rows)
-            if total is not None:
-                if offset >= total:
-                    break
-            elif len(page_rows) < DATA_PAGE_SIZE:
-                break
-            if not page_rows:
-                break
-        else:
-            complete = False
-        return rows, complete, attempts, last_http_status
 
-    def _failure_result(self, contractor: ContractorContext, failure: DolFetchError) -> SourceResult:
+            if total is not None and offset >= total:
+                return rows, True, attempts, last_http_status
+            if total is None and len(page_rows) < DATA_PAGE_SIZE:
+                return rows, True, attempts, last_http_status
+            if not page_rows:
+                return rows, True, attempts, last_http_status
+
+        return rows, False, attempts, last_http_status
+
+    def _failure_result(
+        self,
+        contractor: ContractorContext,
+        failure: DolFetchError,
+    ) -> SourceResult:
         return self.validate_result(
             SourceResult(
                 source_key=self.source_key,
@@ -617,6 +660,7 @@ class DolEnforcementSource(ResearchSource):
                     status=SourceResultStatus.AUTH_REQUIRED,
                 ),
             )
+
         variants = _aliases(contractor)
         if not variants:
             return self.validate_result(
@@ -637,29 +681,42 @@ class DolEnforcementSource(ResearchSource):
         try:
             dataset = self._discover_dataset()
             schema = self._load_schema(dataset)
-            state = contractor.state.strip().upper() if re.fullmatch(r"[A-Za-z]{2}", contractor.state.strip()) else ""
+            state = (
+                contractor.state.strip().upper()
+                if re.fullmatch(r"[A-Za-z]{2}", contractor.state.strip())
+                else ""
+            )
             all_rows: list[dict[str, Any]] = []
             attempts: list[dict[str, Any]] = []
             complete = True
             last_http_status: int | None = None
+
             for variant in variants:
-                rows, variant_complete, variant_attempts, status = self._query_variant(
-                    dataset, schema, variant, state
+                variant_rows, variant_complete, variant_attempts, status = self._query_variant(
+                    dataset,
+                    schema,
+                    variant,
+                    state,
                 )
-                all_rows.extend(rows)
+                all_rows.extend(variant_rows)
                 attempts.extend(variant_attempts)
                 complete = complete and variant_complete
                 last_http_status = status or last_http_status
         except DolFetchError as failure:
             return self._failure_result(contractor, failure)
 
-        unique: dict[str, dict[str, Any]] = {}
+        unique_rows: dict[str, dict[str, Any]] = {}
         for row in all_rows:
-            unique[_record_id(row, schema)] = row
-        rows = list(unique.values())
-        scored = [_score_row(contractor, row, schema) for row in rows if _row_name(row, schema)]
+            unique_rows[_record_id(row, schema)] = row
+        rows = list(unique_rows.values())
+
+        scored = [
+            _score_row(contractor, row, schema)
+            for row in rows
+            if _row_name(row, schema)
+        ]
         scored.sort(key=lambda item: item.score, reverse=True)
-        plausible = [item for item in scored if item.name_score >= 0.75 and item.score >= 0.78]
+        plausible = [item for item in scored if _is_plausible(item)]
 
         safe_dataset_url = dataset.data_url
         base_payload = {
@@ -680,21 +737,29 @@ class DolEnforcementSource(ResearchSource):
                 "case_id_field": schema.case_id_field,
             },
             "note": (
-                "DOL field ownership is intentionally disabled. DBRA findings are retained as candidate "
-                "evidence for prevailing_wage_violations until the firm's field semantics are confirmed."
+                "DOL field ownership is intentionally disabled. DBRA findings are retained "
+                "as candidate evidence for prevailing_wage_violations until the firm's field "
+                "semantics are confirmed."
             ),
         }
 
         if not plausible:
-            status = SourceResultStatus.SUCCESS_NO_MATCH if complete else SourceResultStatus.PARTIAL_RESULTS
-            completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
+            result_status = (
+                SourceResultStatus.SUCCESS_NO_MATCH
+                if complete
+                else SourceResultStatus.PARTIAL_RESULTS
+            )
             return self.validate_result(
                 SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
-                    status=status,
+                    status=result_status,
                     identity_status=IdentityStatus.NOT_EVALUATED,
-                    completeness_status=completeness,
+                    completeness_status=(
+                        CompletenessStatus.COMPLETE
+                        if complete
+                        else CompletenessStatus.PARTIAL
+                    ),
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
                     acquisition_method="official_dol_v4_api",
@@ -707,18 +772,23 @@ class DolEnforcementSource(ResearchSource):
         best = plausible[0]
         best_key = normalize_company_name(best.candidate_name)
         competing = [
-            item
-            for item in plausible[1:]
-            if item.score >= 0.92 and normalize_company_name(item.candidate_name) != best_key
+            candidate
+            for candidate in plausible[1:]
+            if candidate.score >= 0.92
+            and normalize_company_name(candidate.candidate_name) != best_key
         ]
         confirmed = _auto_confirm(contractor, best) and not competing
+
         matched_rows = [
-            item
-            for item in plausible
-            if normalize_company_name(item.candidate_name) == best_key
-            or (item.score >= 0.92 and item.matched_identity == best.matched_identity)
+            candidate
+            for candidate in plausible
+            if normalize_company_name(candidate.candidate_name) == best_key
+            or (
+                candidate.score >= 0.92
+                and candidate.matched_identity == best.matched_identity
+            )
         ]
-        matched_case_rows = [item.row for item in matched_rows]
+        matched_case_rows = [candidate.row for candidate in matched_rows]
         violation_cases = [row for row in matched_case_rows if _violation_counts(row)]
         dbra_cases = [row for row in matched_case_rows if _dbra_count(row) > 0]
 
@@ -747,7 +817,11 @@ class DolEnforcementSource(ResearchSource):
                     contractor_id=contractor.internal_id,
                     status=SourceResultStatus.AMBIGUOUS_MATCH,
                     identity_status=IdentityStatus.REVIEW_REQUIRED,
-                    completeness_status=CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL,
+                    completeness_status=(
+                        CompletenessStatus.COMPLETE
+                        if complete
+                        else CompletenessStatus.PARTIAL
+                    ),
                     identity_confidence=best.score,
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
@@ -764,18 +838,20 @@ class DolEnforcementSource(ResearchSource):
 
         evidence: list[EvidenceRecord] = []
         if dbra_cases:
-            first = dbra_cases[0]
+            first_dbra_case = dbra_cases[0]
             evidence.append(
                 EvidenceRecord(
                     field_name="prevailing_wage_violations",
                     observed_value="Y",
-                    source_record_id=_record_id(first, schema),
+                    source_record_id=_record_id(first_dbra_case, schema),
                     source_url=safe_dataset_url,
                     details={
                         "evidence_only_pending_field_ownership": True,
                         "law": "Davis-Bacon and Related Acts (DBRA)",
                         "dbra_violation_case_count": len(dbra_cases),
-                        "dbra_violation_count": sum(_dbra_count(row) for row in dbra_cases),
+                        "dbra_violation_count": sum(
+                            _dbra_count(row) for row in dbra_cases
+                        ),
                         "matched_employer_name": best.candidate_name,
                     },
                 )
