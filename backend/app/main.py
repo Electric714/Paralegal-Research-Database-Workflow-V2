@@ -19,6 +19,7 @@ from .research.executor import execute_research_run
 from .research.field_mappings import SOURCE_FIELD_MAPPINGS
 from .research.identity_review import list_identity_review_items, resolve_identity_review
 from .research.service import list_tasks, record_identity_judgment, review_change
+from .research.run_summary import get_run_summary
 from .research.sources.sam_exclusions import (
     MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
     SamExtractError,
@@ -406,6 +407,14 @@ def execute_run(run_id: int):
 @app.get("/api/runs")
 def runs():
     return {"items": db.list_runs()}
+
+
+@app.get("/api/runs/{run_id}/summary")
+def run_summary(run_id: int):
+    try:
+        return {"item": get_run_summary(run_id)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/tasks")
