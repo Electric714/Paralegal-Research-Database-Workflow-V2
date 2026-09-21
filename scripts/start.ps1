@@ -12,8 +12,16 @@ $PythonBinDir = Join-Path $Runtime 'python-bin'
 $VenvDir = Join-Path $Root '.venv'
 $VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
 $Frontend = Join-Path $Root 'frontend'
+$Backend = Join-Path $Root 'backend'
+$LogDir = Join-Path $Runtime 'logs'
+$PidFile = Join-Path $Runtime 'server.pid'
+$StdoutLog = Join-Path $LogDir 'server.log'
+$StderrLog = Join-Path $LogDir 'server-error.log'
+$Url = 'http://127.0.0.1:8000'
+$HealthUrl = "$Url/api/health"
 
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 function Assert-Success([string]$Step) {
     if ($LASTEXITCODE -ne 0) {
@@ -21,15 +29,25 @@ function Assert-Success([string]$Step) {
     }
 }
 
+function Test-AppOnline {
+    try {
+        $Health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
+        return ($Health.name -eq 'Paralegal Research Desk' -and $Health.status -eq 'ok')
+    }
+    catch {
+        return $false
+    }
+}
+
 Write-Host ''
 Write-Host '==============================================='
-Write-Host ' Paralegal Research Desk - Local Setup/Launch'
+Write-Host ' Paralegal Research Desk'
 Write-Host '==============================================='
 Write-Host ''
 
 # Bootstrap uv locally. uv itself does not require Python.
 if (-not (Test-Path $UvExe)) {
-    Write-Host '[1/6] Downloading the local Python bootstrap tool...'
+    Write-Host '[1/7] Preparing local runtime tools...'
     New-Item -ItemType Directory -Force -Path $UvDir | Out-Null
     $env:UV_UNMANAGED_INSTALL = $UvDir
     $env:UV_NO_MODIFY_PATH = '1'
@@ -41,10 +59,10 @@ if (-not (Test-Path $UvExe)) {
         Remove-Item Env:UV_NO_MODIFY_PATH -ErrorAction SilentlyContinue
     }
     if (-not (Test-Path $UvExe)) {
-        throw 'Could not install the local uv bootstrap tool.'
+        throw 'Could not install the local runtime bootstrap tool.'
     }
 } else {
-    Write-Host '[1/6] Local bootstrap tool already available.'
+    Write-Host '[1/7] Local runtime tools ready.'
 }
 
 # Keep uv-managed Python completely inside this project.
@@ -54,17 +72,17 @@ $env:UV_PYTHON_NO_REGISTRY = '1'
 $env:UV_MANAGED_PYTHON = '1'
 
 if (-not (Test-Path $VenvPython)) {
-    Write-Host '[2/6] Downloading project-local Python and creating .venv...'
+    Write-Host '[2/7] Downloading project-local Python and creating isolated environment...'
     & $UvExe python install 3.12 --managed-python
     Assert-Success 'Python download'
     & $UvExe venv $VenvDir --python 3.12 --managed-python
     Assert-Success 'Virtual environment creation'
 } else {
-    Write-Host '[2/6] Project Python environment already available.'
+    Write-Host '[2/7] Project-local Python ready.'
 }
 
-Write-Host '[3/6] Installing/updating backend dependencies inside .venv...'
-& $UvExe pip install --python $VenvPython -r (Join-Path $Root 'backend\requirements.txt')
+Write-Host '[3/7] Preparing backend dependencies...'
+& $UvExe pip install --python $VenvPython -r (Join-Path $Backend 'requirements.txt') --quiet
 Assert-Success 'Backend dependency installation'
 
 # Bootstrap a portable Node.js runtime locally instead of requiring a system install.
@@ -76,64 +94,75 @@ $NodeExe = Join-Path $NodeHome 'node.exe'
 $NpmExe = Join-Path $NodeHome 'npm.cmd'
 
 if (-not (Test-Path $NodeExe)) {
-    Write-Host '[4/6] Downloading portable Node.js...'
+    Write-Host '[4/7] Downloading portable frontend runtime...'
     $NodeZip = Join-Path $Runtime "$NodeFolder.zip"
     $NodeUrl = "https://nodejs.org/dist/v$NodeVersion/$NodeFolder.zip"
     Invoke-WebRequest -UseBasicParsing -Uri $NodeUrl -OutFile $NodeZip
     Expand-Archive -Path $NodeZip -DestinationPath $Runtime -Force
     Remove-Item $NodeZip -Force
     if (-not (Test-Path $NodeExe)) {
-        throw 'Portable Node.js download completed, but node.exe was not found.'
+        throw 'Portable frontend runtime download completed, but node.exe was not found.'
     }
 } else {
-    Write-Host '[4/6] Portable Node.js already available.'
+    Write-Host '[4/7] Portable frontend runtime ready.'
 }
 
-# npm lifecycle scripts need the portable node.exe on PATH.
 $env:PATH = "$NodeHome;$env:PATH"
 
-Write-Host '[5/6] Installing/updating frontend dependencies...'
+Write-Host '[5/7] Preparing frontend dependencies...'
 Push-Location $Frontend
 try {
-    & $NpmExe install --no-audit --no-fund
+    & $NpmExe install --no-audit --no-fund --silent
     Assert-Success 'Frontend dependency installation'
+
+    Write-Host '[6/7] Building application interface...'
+    & $NpmExe run build
+    Assert-Success 'Frontend build'
 }
 finally {
     Pop-Location
 }
 
-Write-Host '[6/6] Starting the application...'
-$BackendCommand = "Set-Location '$Root\backend'; & '$VenvPython' -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
-$FrontendCommand = "`$env:PATH='$NodeHome;' + `$env:PATH; Set-Location '$Frontend'; & '$NpmExe' run dev"
+Write-Host '[7/7] Starting application...'
 
-Start-Process powershell.exe -ArgumentList '-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-Command',$BackendCommand
-Start-Process powershell.exe -ArgumentList '-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-Command',$FrontendCommand
+if (-not (Test-AppOnline)) {
+    if (Test-Path $PidFile) {
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    }
 
-Write-Host 'Waiting for the local web application to respond...'
-$Url = 'http://127.0.0.1:5173'
-$Deadline = (Get-Date).AddSeconds(60)
-$Online = $false
-while ((Get-Date) -lt $Deadline) {
-    try {
-        $Response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
-        if ($Response.StatusCode -ge 200 -and $Response.StatusCode -lt 500) {
-            $Online = $true
-            break
+    $Process = Start-Process \
+        -FilePath $VenvPython \
+        -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000') \
+        -WorkingDirectory $Backend \
+        -WindowStyle Hidden \
+        -RedirectStandardOutput $StdoutLog \
+        -RedirectStandardError $StderrLog \
+        -PassThru
+
+    Set-Content -Path $PidFile -Value $Process.Id -Encoding ascii
+
+    $Deadline = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $Deadline) {
+        if (Test-AppOnline) { break }
+        if ($Process.HasExited) {
+            $ErrorTail = if (Test-Path $StderrLog) { (Get-Content $StderrLog -Tail 25) -join [Environment]::NewLine } else { 'No server error log was created.' }
+            throw "The application server stopped during startup.`n`n$ErrorTail"
         }
+        Start-Sleep -Milliseconds 500
     }
-    catch {
-        Start-Sleep -Milliseconds 750
+
+    if (-not (Test-AppOnline)) {
+        throw "The application did not respond in time. Check: $StderrLog"
     }
+} else {
+    Write-Host 'Application is already running; opening it now.'
 }
 
-if (-not $Online) {
-    throw 'The local servers were started, but the web application did not respond. Check the Backend and Frontend windows for the specific error.'
-}
-
+# Open the default browser automatically. No URL copying is required.
 Start-Process $Url
+
 Write-Host ''
-Write-Host 'Paralegal Research Desk is running.'
-Write-Host 'Browser: http://127.0.0.1:5173'
-Write-Host 'Backend: http://127.0.0.1:8000'
-Write-Host ''
-Write-Host 'Keep the Backend and Frontend PowerShell windows open while using the program.'
+Write-Host 'Paralegal Research Desk is open in your browser.'
+Write-Host 'This launcher can now close; the application continues running quietly in the background.'
+Write-Host 'Use STOP_HERE.bat when you want to shut it down.'
+Start-Sleep -Seconds 2
