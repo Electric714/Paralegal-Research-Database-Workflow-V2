@@ -15,8 +15,16 @@ from pydantic import BaseModel, Field
 
 from . import database as db
 from .import_validation import ValidationReport, validate_bidder_rows
+from .research.executor import execute_research_run
 from .research.field_mappings import SOURCE_FIELD_MAPPINGS
+from .research.identity_review import list_identity_review_items, resolve_identity_review
 from .research.service import list_tasks, record_identity_judgment, review_change
+from .research.sources.sam_exclusions import (
+    MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
+    SamExtractError,
+    SamExclusionsSource,
+    store_uploaded_extract,
+)
 from .sources import SOURCES, SOURCE_KEYS
 
 APP_NAME = "Paralegal Research Desk"
@@ -31,7 +39,7 @@ EXPECTED_COLUMNS = [
     "dwd_substance_abuse_plan", "better_business_bureau_complaints", "misc_violations", "tax_liability",
 ]
 
-app = FastAPI(title=APP_NAME, version="0.2.0")
+app = FastAPI(title=APP_NAME, version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -59,6 +67,13 @@ class IdentityJudgmentRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     decided_by: str | None = None
     notes: str | None = None
+
+
+class IdentityReviewResolutionRequest(BaseModel):
+    source_record_id: str
+    judgment: str
+    actor: str | None = None
+    note: str | None = None
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -120,7 +135,7 @@ def _validate_import(columns: list[str], rows: list[dict[str, str]]) -> Validati
 
 @app.get("/api/health")
 def health():
-    return {"name": APP_NAME, "status": "ok", "version": "0.2.0"}
+    return {"name": APP_NAME, "status": "ok", "version": "0.3.0"}
 
 
 @app.get("/api/schema")
@@ -140,12 +155,15 @@ def schema():
 def dashboard():
     active = db.active_import()
     reviews = db.list_review_proposals()
+    identity_reviews = list_identity_review_items()
     runs = db.list_runs(1)
     return {
         "bidder_count": db.count_bidders(),
         "source_count": len(SOURCES),
         "implemented_source_count": sum(1 for source in SOURCES if source["status"] == "ready"),
-        "pending_review_count": sum(1 for item in reviews if item["status"] == "pending"),
+        "pending_review_count": sum(1 for item in reviews if item["status"] == "pending") + len(identity_reviews),
+        "pending_change_count": sum(1 for item in reviews if item["status"] == "pending"),
+        "pending_identity_count": len(identity_reviews),
         "active_import": active,
         "last_run": runs[0] if runs else None,
     }
@@ -154,6 +172,50 @@ def dashboard():
 @app.get("/api/sources")
 def sources():
     return {"items": SOURCES}
+
+
+@app.get("/api/sources/sam/status")
+def sam_status():
+    try:
+        return {"item": SamExclusionsSource().health_check()}
+    except Exception as exc:
+        raise HTTPException(500, f"Unable to inspect SAM source status: {exc}") from exc
+
+
+@app.post("/api/sources/sam/extract")
+async def upload_sam_extract(file: UploadFile = File(...)):
+    data = await file.read()
+    if not data:
+        raise HTTPException(422, "The SAM extract is empty.")
+    if len(data) > SAM_MAX_EXTRACT_BYTES:
+        raise HTTPException(413, "The SAM extract exceeds the configured size limit.")
+    filename = Path(file.filename or "sam_exclusions.zip").name
+    try:
+        dataset = store_uploaded_extract(data, filename)
+    except SamExtractError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.add_diagnostic(
+        "INFO",
+        "SAM exclusions extract loaded",
+        source_key="sam",
+        stage="source_setup",
+        details={
+            "filename": dataset.path.name,
+            "csv_name": dataset.csv_name,
+            "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
+            "record_count": len(dataset.records),
+            "sha256": dataset.sha256,
+        },
+    )
+    return {
+        "item": {
+            "filename": dataset.path.name,
+            "csv_name": dataset.csv_name,
+            "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
+            "record_count": len(dataset.records),
+            "sha256": dataset.sha256,
+        }
+    }
 
 
 @app.post("/api/import/preview")
@@ -268,7 +330,19 @@ def create_run(payload: RunRequest):
         bidder_count = db.count_bidders()
     if bidder_count == 0:
         raise HTTPException(422, "Import the bidder database before creating a research run.")
-    return {"item": db.create_run(payload.bidder_ids, payload.source_keys, bidder_count)}
+
+    run = db.create_run(payload.bidder_ids, payload.source_keys, bidder_count)
+    execution = execute_research_run(run["id"])
+    return {"item": execution["run"], "execution": execution}
+
+
+@app.post("/api/runs/{run_id}/execute")
+def execute_run(run_id: int):
+    try:
+        execution = execute_research_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"item": execution["run"], "execution": execution}
 
 
 @app.get("/api/runs")
@@ -279,6 +353,20 @@ def runs():
 @app.get("/api/tasks")
 def tasks(research_run_id: int | None = None):
     return {"items": list_tasks(research_run_id)}
+
+
+@app.get("/api/identity-review")
+def identity_review_queue(limit: int = Query(200, ge=1, le=1000)):
+    return {"items": list_identity_review_items(limit)}
+
+
+@app.post("/api/identity-review/{snapshot_id}")
+def resolve_identity(snapshot_id: int, payload: IdentityReviewResolutionRequest):
+    try:
+        item = resolve_identity_review(snapshot_id=snapshot_id, **payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"item": item}
 
 
 @app.post("/api/identity-judgments")
