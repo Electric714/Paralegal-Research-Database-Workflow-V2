@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import os
 import re
 import zipfile
@@ -10,7 +11,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email.message import Message
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from rapidfuzz import fuzz, process
@@ -260,7 +262,9 @@ def parse_sam_exclusions(data: bytes, filename: str) -> tuple[str, list[SamExclu
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if not reader.fieldnames:
         raise SamExtractError("SAM exclusions CSV has no header row.")
-    mapped = _mapped_headers([str(value or "").strip() for value in reader.fieldnames])
+    # Preserve the exact DictReader keys for row lookup. Header normalization is
+    # used only to map the official labels to semantic fields.
+    mapped = _mapped_headers([str(value or "") for value in reader.fieldnames])
 
     records: list[SamExclusionRecord] = []
     for raw in reader:
@@ -270,7 +274,7 @@ def parse_sam_exclusions(data: bytes, filename: str) -> tuple[str, list[SamExclu
 
         classification = value("classification").strip()
         # The bidder database contains contractor/business entities. Individuals and
-        # vessels are retained out of this adapter's candidate pool deliberately.
+        # vessels are intentionally excluded from this bidder-focused candidate pool.
         if normalize_text(classification) != "firm":
             continue
         name = value("name").strip()
@@ -357,8 +361,133 @@ def _filename_from_headers(response: httpx.Response) -> str | None:
     return message.get_filename()
 
 
+def _looks_like_extract(response: httpx.Response) -> bool:
+    data = response.content
+    content_type = response.headers.get("content-type", "").casefold()
+    filename = (_filename_from_headers(response) or "").casefold()
+    if data.startswith(b"PK\x03\x04"):
+        return True
+    if filename.endswith((".zip", ".csv")):
+        return True
+    if "zip" in content_type or "csv" in content_type or "octet-stream" in content_type:
+        return bool(data)
+    return False
+
+
+def _walk_json_strings(value: Any, path: tuple[str, ...] = ()) -> Iterable[tuple[tuple[str, ...], str]]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _walk_json_strings(item, (*path, str(key)))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _walk_json_strings(item, (*path, str(index)))
+    elif isinstance(value, str):
+        yield path, value.strip()
+
+
+def _json_download_reference(response: httpx.Response) -> tuple[str | None, str | None]:
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return None, None
+
+    file_name: str | None = None
+    download_url: str | None = None
+    for path, value in _walk_json_strings(payload):
+        if not value:
+            continue
+        key = "".join(path).casefold()
+        lower = value.casefold()
+        if value.startswith(("https://", "http://")) and any(token in key for token in ("url", "link", "download")):
+            download_url = download_url or value
+        if lower.endswith((".zip", ".csv")) and not value.startswith(("https://", "http://")):
+            if any(token in key for token in ("file", "name", "extract")):
+                file_name = file_name or Path(value).name
+    return file_name, download_url
+
+
+def _sam_url_with_key(url: str, api_key: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    if parsed.scheme != "https" or not (host == "sam.gov" or host.endswith(".sam.gov")):
+        raise SamDownloadError(
+            "SAM.gov returned a download URL on an unexpected host; refusing to fetch it automatically.",
+            status=SourceResultStatus.DATASET_MALFORMED,
+        )
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault("api_key", api_key)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _classify_http_error(response: httpx.Response) -> SamDownloadError:
+    if response.status_code in {401, 403}:
+        return SamDownloadError(
+            "SAM.gov rejected the API key or the account is not authorized for public extracts.",
+            status=SourceResultStatus.AUTH_REQUIRED,
+            http_status=response.status_code,
+        )
+    return SamDownloadError(
+        f"SAM exclusions extract returned HTTP {response.status_code}.",
+        status=SourceResultStatus.HTTP_ERROR,
+        http_status=response.status_code,
+    )
+
+
+def _resolve_extract_response(
+    client: httpx.Client,
+    response: httpx.Response,
+    *,
+    api_key: str,
+) -> tuple[bytes, str]:
+    if response.status_code != 200:
+        raise _classify_http_error(response)
+
+    if _looks_like_extract(response):
+        filename = _filename_from_headers(response)
+        if not filename:
+            # Never invent today's date. The CSV name inside an official ZIP can
+            # still establish freshness; otherwise the extract remains undated and
+            # therefore partial.
+            filename = "SAM_Exclusions_Public_Extract_V2_download.ZIP" if response.content.startswith(b"PK\x03\x04") else "SAM_Exclusions_Public_Extract_V2_download.CSV"
+        return response.content, filename
+
+    file_name, download_url = _json_download_reference(response)
+    follow_up: httpx.Response | None = None
+    if file_name:
+        follow_up = client.get(
+            SAM_EXTRACT_API,
+            params={"api_key": api_key, "fileName": file_name},
+            headers={"Accept": "application/zip, application/json"},
+        )
+    elif download_url:
+        follow_up = client.get(
+            _sam_url_with_key(download_url, api_key),
+            headers={"Accept": "application/zip, application/json"},
+        )
+
+    if follow_up is None:
+        raise SamDownloadError(
+            "SAM.gov returned JSON, but no usable extract file reference was present.",
+            status=SourceResultStatus.DATASET_MALFORMED,
+            http_status=response.status_code,
+        )
+    if follow_up.status_code != 200:
+        raise _classify_http_error(follow_up)
+    if not _looks_like_extract(follow_up):
+        raise SamDownloadError(
+            "SAM.gov returned a file reference, but the follow-up response was not a ZIP or CSV extract.",
+            status=SourceResultStatus.DATASET_MALFORMED,
+            http_status=follow_up.status_code,
+        )
+    resolved_name = _filename_from_headers(follow_up) or file_name
+    if not resolved_name:
+        resolved_name = "SAM_Exclusions_Public_Extract_V2_download.ZIP" if follow_up.content.startswith(b"PK\x03\x04") else "SAM_Exclusions_Public_Extract_V2_download.CSV"
+    return follow_up.content, resolved_name
+
+
 def download_latest_extract(*, api_key: str, cache_dir: Path | None = None) -> SamDataset:
-    if not api_key.strip():
+    api_key = api_key.strip()
+    if not api_key:
         raise SamDownloadError(
             "SAM public extract download requires a SAM.gov API key.",
             status=SourceResultStatus.AUTH_REQUIRED,
@@ -367,34 +496,17 @@ def download_latest_extract(*, api_key: str, cache_dir: Path | None = None) -> S
         with httpx.Client(timeout=httpx.Timeout(120.0, connect=20.0), follow_redirects=True) as client:
             response = client.get(
                 SAM_EXTRACT_API,
-                params={"api_key": api_key.strip(), "fileType": "EXCLUSION"},
-                headers={"Accept": "application/zip"},
+                params={"api_key": api_key, "fileType": "EXCLUSION"},
+                headers={"Accept": "application/zip, application/json"},
             )
+            data, filename = _resolve_extract_response(client, response, api_key=api_key)
+    except SamDownloadError:
+        raise
     except httpx.TimeoutException as exc:
         raise SamDownloadError("SAM exclusions extract download timed out.", status=SourceResultStatus.TIMEOUT) from exc
     except httpx.HTTPError as exc:
         raise SamDownloadError("SAM exclusions extract download failed.", status=SourceResultStatus.SOURCE_UNAVAILABLE) from exc
 
-    if response.status_code in {401, 403}:
-        raise SamDownloadError(
-            "SAM.gov rejected the API key or the account is not authorized for public extracts.",
-            status=SourceResultStatus.AUTH_REQUIRED,
-            http_status=response.status_code,
-        )
-    if response.status_code != 200:
-        raise SamDownloadError(
-            f"SAM exclusions extract returned HTTP {response.status_code}.",
-            status=SourceResultStatus.HTTP_ERROR,
-            http_status=response.status_code,
-        )
-
-    data = response.content
-    filename = _filename_from_headers(response)
-    if not filename:
-        # The official API returns the latest file when date is omitted. If the
-        # response does not expose a filename, preserve today's Julian date while
-        # parse/validation still guards against a non-extract response.
-        filename = "SAM_Exclusions_Public_Extract_V2_" + datetime.now(timezone.utc).strftime("%y%j") + ".ZIP"
     try:
         dataset = store_uploaded_extract(data, filename, cache_dir=cache_dir)
     except SamExtractError as exc:
@@ -483,8 +595,8 @@ def _remembered_judgment(bidder_id: int, record_id: str) -> str | None:
 class SamExclusionsSource(ResearchSource):
     source_key = "sam"
     display_name = "SAM.gov Federal Exclusions"
-    adapter_version = "1.0.0"
-    parser_version = "1.0.0"
+    adapter_version = "1.1.0"
+    parser_version = "1.0.1"
 
     def __init__(
         self,
