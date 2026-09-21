@@ -2,7 +2,7 @@ from __future__ import annotations
 
 SOURCES = [
     {"key": "wdfi", "name": "Wisconsin Department of Financial Institutions", "url": "https://www.wdfi.org/", "category": "Business status", "status": "not_implemented"},
-    {"key": "osha", "name": "OSHA Establishment Search", "url": "https://www.osha.gov/pls/imis/establishment.html", "category": "Safety / enforcement", "status": "not_implemented"},
+    {"key": "osha", "name": "OSHA Establishment Search", "url": "https://www.osha.gov/ords/imis/establishment.html", "category": "Safety / enforcement", "status": "ready"},
     {"key": "wcrb", "name": "Wisconsin Compensation Rating Bureau", "url": "https://www.wcrb.org/", "category": "Workers compensation", "status": "not_implemented"},
     {"key": "wcca", "name": "Wisconsin Circuit Court Access / CCAP", "url": "https://wcca.wicourts.gov/index.xsl", "category": "State court records", "status": "not_implemented"},
     {"key": "pacer", "name": "PACER", "url": "https://pacer.login.uscourts.gov/csologin/login.jsf", "category": "Federal court records", "status": "not_implemented"},
