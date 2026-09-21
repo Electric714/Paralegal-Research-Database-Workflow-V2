@@ -23,8 +23,8 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "wcrb": SourceFieldMapping("wcrb", frozenset({"wc", "wc_date"}), "Workers-compensation fields."),
     "wcca": SourceFieldMapping(
         "wcca",
-        frozenset({"circuit_court", "ccap_show150"}),
-        "Wisconsin circuit-court/CCAP fields.",
+        frozenset(),
+        "WCCA evidence is comparison-only until the firm confirms the exact circuit_court and ccap_show150 legacy rules.",
     ),
     "pacer": SourceFieldMapping("pacer", frozenset({"federal_court"}), "Federal-court field."),
     "sam": SourceFieldMapping("sam", frozenset({"state_federal_debarment"}), "Federal exclusions/debarment evidence."),
