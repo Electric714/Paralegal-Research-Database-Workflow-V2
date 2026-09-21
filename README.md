@@ -43,11 +43,11 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
+- [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
-- [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
 - [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
@@ -76,7 +76,7 @@ A source moves from **Ongoing** to **Completed** only when all applicable gates 
 
 ### Recommended Implementation Order
 
-Finish and verify the four active source tracks first: **SAM.gov → OSHA → WDFI → BBB**. After those are stable, implement **WCRB** next because it has a narrow, already-defined field scope (`wc`, `wc_date`) and fits the source-specific adapter pattern cleanly. Then proceed to **WCCA/CCAP**, followed by structured enforcement/debarment datasets such as **Violation Tracker, Wisconsin DOT, DOL Enforcement, Minnesota Debarment, and Minnesota PCA**. Leave **PACER** until the authenticated-access and cost/session model is explicitly designed rather than bolting login automation onto the general scraper pipeline.
+Finish and verify the four active source tracks first: **SAM.gov → OSHA → WDFI → BBB**. After those are stable, implement **WCRB** next because it has a narrow, already-defined field scope (`wc`, `wc_date`) and fits the source-specific adapter pattern cleanly. Then proceed to **WCCA/CCAP**, followed by structured enforcement/debarment datasets such as **Violation Tracker, Wisconsin DOT, DOL Enforcement, Minnesota Debarment, and Minnesota PCA**. **PACER remains an ongoing problem item until a reliable no-cost acquisition method is identified; do not implement the fee-based PACER API/search workflow.**
 
 ## Project Goal
 
