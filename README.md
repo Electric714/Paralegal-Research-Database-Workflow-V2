@@ -51,7 +51,7 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
-- [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
+- [ ] **Minnesota PCA Enforcement Actions** — official structured MPCA enforcement-data adapter implemented on branch `feature/minnesota-pca-enforcement`; confirmed exact bidder/approved-alias matches may propose `environmental_violations = Y`; clean no-match never proposes `N`; ambiguous/failed/malformed results fail closed. Final live representative-bidder verification remains before completion. See `docs/sources/MN_PCA.md`.
 - [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
