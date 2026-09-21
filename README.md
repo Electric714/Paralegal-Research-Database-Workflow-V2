@@ -18,54 +18,49 @@ Downloaded runtimes live under `.runtime/`, the Python environment lives under `
 
 ## Project Completion Checklist / Agent Coordination Board
 
-This section is the shared implementation map for humans and coding agents. Update it whenever work starts, changes state, or is merged so another agent can immediately see what is actually being worked on.
+This is the shared project map for humans and coding agents. Update this section whenever work starts, finishes, becomes blocked, or moves back into active development.
 
-Status convention:
+A task belongs under **Completed** only when the relevant work is merged to `main`, tests pass, and the basic workflow has been manually verified. Move a task from **To Do** to **Ongoing** before beginning substantial work and include the branch or PR when one exists.
 
-- `[x] DONE` — merged to `main`, tests pass, and the feature has been manually verified enough to trust its basic workflow.
-- `[ ] ONGOING` — actively being implemented, debugged, or verified. Add the branch and/or PR when available.
-- `[ ] TODO` — not actively implemented yet.
-- `[ ] BLOCKED` — work cannot safely continue until a dependency, access issue, field definition, or source limitation is resolved. State the blocker on the same line.
+### Completed
 
-Agent coordination rule: change a task from `TODO` to `ONGOING` before beginning substantial work and add the working branch/PR. A branch name by itself does **not** mean implementation exists. Do not mark a source `DONE` merely because a scraper returns a page; the source must satisfy the source completion gates below.
+- [x] **UI / App Shell** — Windows one-click launcher and local application shell
+- [x] **Database Import / Export** — bidder CSV import/export with complete imported-row preservation
+- [x] **Bidder Database / Record Handling** — stable bidder identity, import validation, and complete bidder records
+- [x] **Research Backend Foundation** — bidder × source research tasks with explicit result/completeness states
+- [x] **Evidence / Provenance System** — research evidence stored separately from the approved master database
+- [x] **Identity Matching System** — conservative contractor matching with remembered SAME_ENTITY / DIFFERENT_ENTITY judgments
+- [x] **Approve / Dismiss Review Workflow** — proposed changes require human approval before modifying master data
+- [x] **Audit / Revision History** — master revisions and audit events retained
+- [x] **Automated Backend Testing / CI** — fixture-test pattern and pytest CI coverage for the research foundation
 
-### Platform and Workflow Foundation
+### Ongoing
 
-- [x] **DONE — Windows one-click application shell and local launcher** (`START_HERE.bat` / `STOP_HERE.bat`)
-- [x] **DONE — Bidder CSV import/export with complete imported-row preservation**
-- [x] **DONE — Stable bidder identity and import validation**
-- [x] **DONE — Research task model: bidder × source tasks with explicit result/completeness states**
-- [x] **DONE — Separate research evidence/provenance storage; research cannot silently overwrite the approved master database**
-- [x] **DONE — Conservative contractor identity matching and remembered SAME_ENTITY / DIFFERENT_ENTITY judgments**
-- [x] **DONE — Proposed-change workflow with human approve/dismiss actions, revision history, and audit events**
-- [x] **DONE — Backend fixture-test pattern and CI pytest coverage for the research foundation**
-- [ ] **ONGOING — End-to-end review/diagnostics UX polish as real sources are added**
-- [ ] **TODO — Cross-source research-run summary showing completed, no-match, ambiguous, partial, blocked, and failed counts in one place**
-- [ ] **TODO — Operator-friendly retry/re-run controls for failed or partial source tasks without duplicating evidence**
-- [ ] **TODO — Final clean-machine regression pass of install → import → research → review → approve/dismiss → export**
+- [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
+- [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
+- [ ] **OSHA** — OSHA Establishment Search adapter is in PR #5 (`feature/osha-establishment-research`); merge/reconciliation and real bidder verification remain
+- [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
+- [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
-### Source Implementation Checklist
+### To Do
 
-Keep this list in the same order as the firm's source list so it remains easy to reconcile with the existing workflow.
-
-1. [ ] **ONGOING — Wisconsin Department of Financial Institutions (WDFI)** — branch `feature/wdfi-corporate-records` exists, but it currently has no implementation commits ahead of `main`. Intended owned field: `dfi`. Next: implement targeted corporate-record acquisition, identity matching, evidence capture, conservative proposal behavior, fixtures, and manual verification.
-2. [ ] **ONGOING — OSHA Establishment Search** — PR #5 (`feature/osha-establishment-research`) is open with the source adapter, parsing, identity checks, inspection-detail evidence, and tests. Next: reconcile/merge the PR, manually verify representative bidder searches, and keep `osha_severe_violations` / `years` evidence-only until those field semantics are confirmed.
-3. [ ] **TODO — Wisconsin Compensation Rating Bureau (WCRB)** — intended owned fields: `wc`, `wc_date`. **Recommended next new source after the currently active SAM/OSHA/WDFI/BBB work is stabilized.** First step: determine the most reliable WCRB acquisition path and the exact meaning of the firm's `wc` and `wc_date` fields before allowing proposals.
-4. [ ] **TODO — Wisconsin Circuit Court Access / CCAP (WCCA)** — intended owned fields: `circuit_court`, `ccap_show150`. Requires a source-specific court-search design, pagination/completeness handling, entity matching, and explicit rules for what qualifies as a proposed field change.
-5. [ ] **TODO — PACER** — intended owned field: `federal_court`. Authenticated/possibly fee-sensitive source; define permitted access, query-cost controls, session handling, and human-review behavior before implementation.
-6. [ ] **ONGOING — SAM.gov Public Exclusions** — core official Public Exclusions V2 CSV/ZIP workflow is merged to `main`, and the false-positive identity-matching hardening from PR #6 is also merged. Next: finish end-to-end operator verification of the manual extract upload path, regression-test false positives against real sample bidders, and remove/disable any remaining API-key-first UX that conflicts with the preferred uploaded daily extract workflow.
-7. [ ] **ONGOING — Better Business Bureau (BBB)** — branch `feature/bbb-targeted-research` exists, but it currently has no implementation commits ahead of `main`. Intended owned field: `better_business_bureau_complaints`. Next: implement targeted bidder lookup, stable profile selection, complaint evidence extraction, ambiguity handling, tests, and manual verification.
-8. [ ] **TODO — Violation Tracker** — useful enforcement evidence source. Automatic field ownership is intentionally unassigned until the firm confirms which bidder field(s) this source is allowed to update; evidence collection may be implemented before proposal ownership.
-9. [ ] **TODO — Wisconsin DOT Contractor Information** — source acquisition and exact bidder-field ownership still need to be defined before automatic proposals are allowed.
-10. [ ] **TODO — U.S. Department of Labor Enforcement Data** — likely useful for multiple labor/enforcement fields, but field ownership is intentionally withheld until the firm's definitions are confirmed. Prefer official downloadable/data-catalog paths when available.
-11. [ ] **TODO — GSA OIG State Suspension & Debarment Directory** — treat primarily as a directory/meta-source for authoritative state debarment sources unless a direct contractor-level dataset is identified. No bidder-field ownership is currently assigned.
-12. [ ] **TODO — Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`. Determine current authoritative acquisition format, matching rules, completeness, and freshness behavior.
-13. [ ] **TODO — Responsible Minnesota** — source acquisition and exact bidder-field ownership still need to be confirmed; evidence-only until mapping is approved.
-14. [ ] **TODO — Minnesota Pollution Control Agency Enforcement Actions** — intended owned field: `environmental_violations`. Prefer official structured/downloadable enforcement data when available and preserve enforcement-action provenance.
+- [ ] **WCRB — Next Site** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
+- [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
+- [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
+- [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
+- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
+- [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
+- [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
+- [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
+- [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
+- [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
+- [ ] **Research Run Summary Dashboard** — show completed, no-match, ambiguous, partial, blocked, and failed counts together
+- [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
+- [ ] **Final Clean-Machine End-to-End Test** — install → import → research → review → approve/dismiss → export
 
 ### Source Completion Gates
 
-A source moves from `ONGOING` to `DONE` only when all applicable gates are satisfied:
+A source moves from **Ongoing** to **Completed** only when all applicable gates are satisfied:
 
 1. Acquisition method is source-specific, documented, and uses the most reliable available official/public path rather than forcing a generic scraper.
 2. Research scope is limited to contractors already present in the approved bidder database plus explicitly stored related-company aliases.
