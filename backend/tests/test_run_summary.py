@@ -5,6 +5,19 @@ from app.research.models import CompletenessStatus, EvidenceRecord, IdentityStat
 from app.research.run_summary import get_run_summary
 from app.research.service import list_tasks, persist_source_result
 
+import pytest
+
+
+@pytest.fixture()
+def isolated_db(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    import_dir = data_dir / "imports"
+    monkeypatch.setattr(db, "DATA_DIR", data_dir)
+    monkeypatch.setattr(db, "IMPORT_DIR", import_dir)
+    monkeypatch.setattr(db, "DB_PATH", data_dir / "test.db")
+    db.init_db()
+    return tmp_path
+
 
 def _import_bidders(tmp_path):
     db.replace_master_database(
