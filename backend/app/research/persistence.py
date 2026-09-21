@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utcnow() -> str:
@@ -161,6 +161,30 @@ def apply_research_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_changes_status ON proposed_changes(status, bidder_id);
         CREATE INDEX IF NOT EXISTS idx_revisions_bidder ON master_revisions(bidder_id, approved_at);
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
+
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_snapshot_update
+        BEFORE UPDATE ON evidence_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'evidence snapshots are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_snapshot_delete
+        BEFORE DELETE ON evidence_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'evidence snapshots are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_record_update
+        BEFORE UPDATE ON evidence_records
+        BEGIN
+            SELECT RAISE(ABORT, 'evidence records are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_record_delete
+        BEFORE DELETE ON evidence_records
+        BEGIN
+            SELECT RAISE(ABORT, 'evidence records are immutable');
+        END;
         """
     )
     conn.execute(
