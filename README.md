@@ -2,23 +2,21 @@
 
 ## Quick Start — Windows
 
-For the proof of concept, the user should not need to install Python, Node.js, npm, or project dependencies manually.
-
 Download or clone the repository, then double-click:
 
 **`START_HERE.bat`**
 
-On first launch, the project bootstraps everything it needs locally inside the repository: a local `uv` bootstrap tool, a project-local Python 3.12 runtime, the `.venv` virtual environment, a portable Node.js runtime, backend dependencies, and frontend dependencies. Nothing is installed system-wide. The only requirements are Windows, PowerShell, and an internet connection for the initial setup/dependency downloads.
+The proof-of-concept launcher assumes the computer has no Python, Node.js, npm, or project dependencies installed. On first launch it downloads everything it needs into the project folder, creates an isolated `.venv`, installs dependencies, builds the React interface, starts one hidden local application process, waits for it to become healthy, and opens the default browser automatically.
 
-The launcher then starts the FastAPI backend and React frontend in separate PowerShell windows and opens the application automatically at:
+There should be no separate backend/frontend console windows and no URL copying. The application runs at:
 
-**http://127.0.0.1:5173**
+**http://127.0.0.1:8000**
 
-Keep both PowerShell windows open while testing. The backend API runs at `http://127.0.0.1:8000`.
+Use **`STOP_HERE.bat`** to stop the hidden local application process.
 
-Downloaded runtimes live under `.runtime/`, the Python virtual environment lives under `.venv/`, and both are ignored by Git. Later launches reuse them.
+Downloaded runtimes live under `.runtime/`, the Python environment lives under `.venv/`, and both are ignored by Git. The first launch requires internet access; later launches reuse the local runtimes.
 
-For this milestone, the 14 research sources are intentionally present as **Not Implemented**. The purpose of the current build is to test the application shell, bidder CSV import/export, database browsing, research-run setup, review workflow scaffolding, source catalog, and diagnostics console before implementing each external source one at a time.
+For this milestone, the 14 research sources are intentionally present as **Not Implemented**. The current build is for validating the application shell, bidder CSV import/export, database browsing, research-run setup, review workflow scaffolding, source catalog, and diagnostics before implementing the external sources one at a time.
 
 ## Project Goal
 
@@ -61,9 +59,15 @@ These are the primary sites the firm's staff currently checks:
 
 Use the most reliable acquisition method appropriate for each source. Some may use an API, some an official downloadable dataset, some HTML, some PDF parsing, some browser automation, and some authenticated access. Do not force every source through one generic scraper. For example, SAM.gov publishes official public exclusions data that may be better suited to local download/cache/matching than repeated per-contractor API calls.
 
-## Current Bidder Data
+## Bidder Database Schema
 
-The example bidder database includes contractor identity fields plus research fields such as business status, workers compensation, OSHA history, severe OSHA violations, years, state/federal debarment, Minnesota DOL ineligibility, public-works complaints, federal court, circuit court/CCAP, environmental violations, prevailing-wage violations, DWD-related fields, BBB complaints, miscellaneous violations, and tax liability.
+The example bidder database currently contains 30 supported fields. The application preserves the complete imported row, not just the summary columns shown in the main table.
+
+The expected example fields are:
+
+`id`, `contractor_name`, `related_companies`, `address_1`, `city`, `state`, `zip`, `additional_address`, `additional_address_city`, `additional_address_state`, `additional_address_zip`, `dfi`, `wc`, `wc_date`, `osha_severe_violations`, `years`, `osha`, `state_federal_debarment`, `mndol_ineligibility`, `public_works_projects_budget_time_quality_complaint`, `federal_court`, `circuit_court`, `ccap_show150`, `environmental_violations`, `prevailing_wage_violations`, `dwd`, `dwd_substance_abuse_plan`, `better_business_bureau_complaints`, `misc_violations`, `tax_liability`.
+
+The main bidder grid is intentionally a readable summary. Clicking a bidder opens the complete record with all 30 expected fields grouped by identity/address, business/coverage, safety/eligibility/public works, and courts/regulatory/complaints. Additional imported columns are preserved and displayed separately. CSV export preserves the active import's original column structure.
 
 The exact meaning and ownership of each field should follow the firm's existing workflow. Do not guess that a source can update a field simply because the data sounds related. Source-to-field mappings should be explicit and tested.
 
