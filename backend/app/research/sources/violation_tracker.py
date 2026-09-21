@@ -62,6 +62,7 @@ class NameSearchOutcome:
     rows: tuple[ViolationTrackerRow, ...]
     attempts: tuple[dict, ...]
     complete: bool
+    had_valid_page: bool
     pages_fetched: int
     reported_count: int | None
     data_version: str | None
@@ -97,16 +98,16 @@ class _TableParser(HTMLParser):
         self._row: list[_Cell] | None = None
         self._cell_parts: list[str] | None = None
         self._cell_links: list[str] = []
-        self._table_depth = 0
+        self._depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
         if tag == "table":
-            self._table_depth += 1
-            if self._table_depth == 1:
+            self._depth += 1
+            if self._depth == 1:
                 self._table = []
                 self.tables.append(self._table)
-        elif tag == "tr" and self._table is not None and self._table_depth == 1:
+        elif tag == "tr" and self._table is not None and self._depth == 1:
             self._row = []
         elif tag in {"td", "th"} and self._row is not None:
             self._cell_parts = []
@@ -126,7 +127,7 @@ class _TableParser(HTMLParser):
         tag = tag.casefold()
         if tag in {"td", "th"} and self._row is not None and self._cell_parts is not None:
             self._row.append(
-                _Cell(text=_collapse_space(" ".join(self._cell_parts)), links=list(self._cell_links))
+                _Cell(_collapse_space(" ".join(self._cell_parts)), list(self._cell_links))
             )
             self._cell_parts = None
             self._cell_links = []
@@ -134,55 +135,50 @@ class _TableParser(HTMLParser):
             if self._row and self._table is not None:
                 self._table.append(self._row)
             self._row = None
-            self._cell_parts = None
-            self._cell_links = []
         elif tag == "table":
-            if self._table_depth == 1:
+            if self._depth == 1:
                 self._table = None
                 self._row = None
                 self._cell_parts = None
                 self._cell_links = []
-            self._table_depth = max(0, self._table_depth - 1)
+            self._depth = max(0, self._depth - 1)
 
 
-class _PageMetaParser(HTMLParser):
-    _BREAK_TAGS = {
-        "br", "p", "div", "tr", "td", "th", "li", "ul", "ol",
-        "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
-    }
+class _MetaParser(HTMLParser):
+    BREAKS = {"br", "p", "div", "li", "tr", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.links: list[str] = []
         self.data_version: str | None = None
-        self._ignored_depth = 0
+        self._ignored = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
         attrs_dict = dict(attrs)
         if tag in {"script", "style"}:
-            self._ignored_depth += 1
+            self._ignored += 1
             return
-        if self._ignored_depth:
+        if self._ignored:
             return
         if tag == "a" and attrs_dict.get("href"):
             self.links.append(attrs_dict["href"] or "")
         if attrs_dict.get("data-version") and not self.data_version:
             self.data_version = attrs_dict["data-version"]
-        if tag in self._BREAK_TAGS:
+        if tag in self.BREAKS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
-        if tag in {"script", "style"} and self._ignored_depth:
-            self._ignored_depth -= 1
+        if tag in {"script", "style"} and self._ignored:
+            self._ignored -= 1
             return
-        if not self._ignored_depth and tag in self._BREAK_TAGS:
+        if not self._ignored and tag in self.BREAKS:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self._ignored_depth:
+        if not self._ignored:
             self.parts.append(data)
 
     def text(self) -> str:
@@ -198,140 +194,22 @@ def _collapse_space(value: str) -> str:
 
 def _canonical_header(value: str) -> str:
     value = normalize_text(value)
-    aliases = {
-        "company": "company",
-        "current parent": "current parent",
-        "current parent industry": "current parent industry",
-        "primary offense": "primary offense",
+    return {
         "primary offense type": "primary offense",
-        "year": "year",
-        "agency": "agency",
-        "penalty": "penalty",
+        "primary offense": "primary offense",
         "penalty amount": "penalty",
-    }
-    return aliases.get(value, value)
+        "penalty": "penalty",
+    }.get(value, value)
 
 
 def _parse_penalty_amount(value: str) -> int | None:
     matches = re.findall(r"\$?\s*([\d,]+(?:\.\d{1,2})?)", value)
     if not matches:
         return None
-    raw = matches[-1].replace(",", "")
     try:
-        return int(float(raw))
+        return int(float(matches[-1].replace(",", "")))
     except ValueError:
         return None
-
-
-def parse_results_page(html: str) -> ParsedViolationTrackerPage:
-    table_parser = _TableParser()
-    table_parser.feed(html)
-    meta_parser = _PageMetaParser()
-    meta_parser.feed(html)
-    visible_text = meta_parser.text()
-
-    result_count: int | None = None
-    count_match = re.search(
-        r"([\d,]+)\s+Violation\s+Tracker\s+results?\s+found",
-        visible_text,
-        re.IGNORECASE,
-    )
-    if count_match:
-        result_count = int(count_match.group(1).replace(",", ""))
-
-    no_results = bool(
-        re.search(r"No\s+Violation\s+Tracker\s+results?\s+found", visible_text, re.IGNORECASE)
-    )
-    if no_results:
-        result_count = 0
-
-    rows: list[ViolationTrackerRow] = []
-    table_found = False
-    required_headers = {
-        "company",
-        "current parent",
-        "current parent industry",
-        "primary offense",
-        "year",
-        "agency",
-        "penalty",
-    }
-
-    for table in table_parser.tables:
-        if not table:
-            continue
-        headers = [_canonical_header(cell.text) for cell in table[0]]
-        if not required_headers.issubset(set(headers)):
-            continue
-        table_found = True
-        header_index = {header: pos for pos, header in enumerate(headers) if header}
-
-        for data_row in table[1:]:
-            if len(data_row) <= max(header_index.values()):
-                continue
-
-            def cell(name: str) -> _Cell:
-                return data_row[header_index[name]]
-
-            company = cell("company").text.strip()
-            if not company:
-                continue
-            detail_href = next(
-                (href for href in cell("company").links if "/violation-tracker/" in href),
-                "",
-            )
-            if not detail_href:
-                detail_href = next(
-                    (href for href in cell("penalty").links if "/violation-tracker/" in href),
-                    "",
-                )
-            parent_href = next(
-                (href for href in cell("current parent").links if "/parent/" in href),
-                "",
-            )
-            penalty_text = cell("penalty").text.strip()
-            rows.append(
-                ViolationTrackerRow(
-                    company=company,
-                    current_parent=cell("current parent").text.strip(),
-                    current_parent_industry=cell("current parent industry").text.strip(),
-                    primary_offense=cell("primary offense").text.strip(),
-                    year=cell("year").text.strip(),
-                    agency=cell("agency").text.strip(),
-                    penalty=penalty_text,
-                    penalty_amount=_parse_penalty_amount(penalty_text),
-                    duplicate_penalty=("asterisk" in penalty_text.casefold() or "(*)" in penalty_text),
-                    detail_url=urljoin(BASE_URL, detail_href) if detail_href else "",
-                    parent_url=urljoin(BASE_URL, parent_href) if parent_href else "",
-                )
-            )
-        break
-
-    pagination_urls: list[str] = []
-    seen_urls: set[str] = set()
-    for href in meta_parser.links:
-        absolute = urljoin(BASE_URL, href)
-        query = parse_qs(urlparse(absolute).query)
-        if "page" not in query:
-            continue
-        try:
-            page = int(query["page"][0])
-        except (ValueError, IndexError):
-            continue
-        if page <= 1 or absolute in seen_urls:
-            continue
-        seen_urls.add(absolute)
-        pagination_urls.append(absolute)
-
-    pagination_urls.sort(key=_page_number)
-    return ParsedViolationTrackerPage(
-        rows=tuple(rows),
-        table_found=table_found,
-        result_count=result_count,
-        no_results=no_results,
-        pagination_urls=tuple(pagination_urls),
-        data_version=meta_parser.data_version,
-    )
 
 
 def _page_number(url: str) -> int:
@@ -342,9 +220,103 @@ def _page_number(url: str) -> int:
         return 1
 
 
+def parse_results_page(html: str) -> ParsedViolationTrackerPage:
+    tables = _TableParser()
+    tables.feed(html)
+    meta = _MetaParser()
+    meta.feed(html)
+    visible = meta.text()
+
+    no_results = bool(
+        re.search(r"No\s+Violation\s+Tracker\s+results?\s+found", visible, re.IGNORECASE)
+    )
+    count_match = re.search(
+        r"([\d,]+)\s+Violation\s+Tracker\s+results?\s+found", visible, re.IGNORECASE
+    )
+    result_count = int(count_match.group(1).replace(",", "")) if count_match else None
+    if no_results:
+        result_count = 0
+
+    required = {
+        "company", "current parent", "current parent industry", "primary offense",
+        "year", "agency", "penalty",
+    }
+    rows: list[ViolationTrackerRow] = []
+    table_found = False
+
+    for table in tables.tables:
+        if not table:
+            continue
+        headers = [_canonical_header(cell.text) for cell in table[0]]
+        if not required.issubset(set(headers)):
+            continue
+        table_found = True
+        positions = {header: index for index, header in enumerate(headers)}
+        max_position = max(positions.values())
+
+        for data_row in table[1:]:
+            if len(data_row) <= max_position:
+                continue
+
+            def cell(name: str) -> _Cell:
+                return data_row[positions[name]]
+
+            company = cell("company").text.strip()
+            if not company:
+                continue
+            detail_href = next(
+                (href for href in cell("company").links if "/violation-tracker/" in href), ""
+            ) or next(
+                (href for href in cell("penalty").links if "/violation-tracker/" in href), ""
+            )
+            parent_href = next(
+                (href for href in cell("current parent").links if "/parent/" in href), ""
+            )
+            penalty = cell("penalty").text.strip()
+            rows.append(
+                ViolationTrackerRow(
+                    company=company,
+                    current_parent=cell("current parent").text.strip(),
+                    current_parent_industry=cell("current parent industry").text.strip(),
+                    primary_offense=cell("primary offense").text.strip(),
+                    year=cell("year").text.strip(),
+                    agency=cell("agency").text.strip(),
+                    penalty=penalty,
+                    penalty_amount=_parse_penalty_amount(penalty),
+                    duplicate_penalty=("asterisk" in penalty.casefold() or "(*)" in penalty),
+                    detail_url=urljoin(BASE_URL, detail_href) if detail_href else "",
+                    parent_url=urljoin(BASE_URL, parent_href) if parent_href else "",
+                )
+            )
+        break
+
+    pages: list[str] = []
+    seen: set[str] = set()
+    for href in meta.links:
+        absolute = urljoin(BASE_URL, href)
+        query = parse_qs(urlparse(absolute).query)
+        if "page" not in query:
+            continue
+        try:
+            page = int(query["page"][0])
+        except (ValueError, IndexError):
+            continue
+        if page > 1 and absolute not in seen:
+            seen.add(absolute)
+            pages.append(absolute)
+    pages.sort(key=_page_number)
+
+    return ParsedViolationTrackerPage(
+        rows=tuple(rows),
+        table_found=table_found,
+        result_count=result_count,
+        no_results=no_results,
+        pagination_urls=tuple(pages),
+        data_version=meta.data_version,
+    )
+
+
 def _split_related_companies(value: str) -> list[str]:
-    if not value.strip():
-        return []
     return [piece.strip() for piece in re.split(r"[;\n|]+", value) if piece.strip()]
 
 
@@ -358,22 +330,21 @@ def _approved_names(contractor: ContractorContext) -> list[tuple[str, str]]:
     for value, basis in candidates:
         value = _collapse_space(value)
         key = normalize_text(value)
-        if not value or not key or key in seen:
-            continue
-        seen.add(key)
-        result.append((value, basis))
+        if value and key and key not in seen:
+            seen.add(key)
+            result.append((value, basis))
     return result
 
 
 def _identity_forms(value: str) -> set[str]:
-    normalized = normalize_text(value)
+    text = normalize_text(value)
     company = normalize_company_name(value)
-    forms = {normalized, company}
-    if normalized:
-        forms.add(normalized.replace(" ", ""))
+    forms = {text, company}
+    if text:
+        forms.add(text.replace(" ", ""))
     if company:
         forms.add(company.replace(" ", ""))
-    return {item for item in forms if item}
+    return {form for form in forms if form}
 
 
 def _same_identity(left: str, right: str) -> bool:
@@ -382,27 +353,28 @@ def _same_identity(left: str, right: str) -> bool:
 
 def _query_is_preserved(url: str, query_name: str) -> bool:
     parsed = urlparse(url)
-    if parsed.hostname != "violationtracker.goodjobsfirst.org":
-        return False
-    if parsed.path not in {"/", "/summary"}:
-        return False
     query = parse_qs(parsed.query, keep_blank_values=True)
-    return query.get("company_op") == ["="] and query.get("company") == [query_name]
+    return (
+        parsed.hostname == "violationtracker.goodjobsfirst.org"
+        and parsed.path in {"/", "/summary"}
+        and query.get("company_op") == ["="]
+        and query.get("company") == [query_name]
+    )
 
 
 def _looks_like_challenge(html: str) -> bool:
     lowered = html.casefold()
-    strong_markers = (
+    result_marker = (
+        "violation tracker results found" in lowered
+        or "no violation tracker results found" in lowered
+    )
+    challenge_markers = (
         "<title>just a moment",
         "<title>attention required",
         "verify you are human",
         "checking your browser before accessing",
     )
-    has_result_markers = (
-        "violation tracker results found" in lowered
-        or "no violation tracker results found" in lowered
-    )
-    return not has_result_markers and any(marker in lowered for marker in strong_markers)
+    return not result_marker and any(marker in lowered for marker in challenge_markers)
 
 
 def _record_id(row: ViolationTrackerRow) -> str:
@@ -412,16 +384,12 @@ def _record_id(row: ViolationTrackerRow) -> str:
             return f"vt:{slug}"
     fingerprint = "|".join(
         [
-            normalize_text(row.company),
-            normalize_text(row.current_parent),
-            normalize_text(row.primary_offense),
-            normalize_text(row.agency),
-            row.year,
-            str(row.penalty_amount or ""),
+            normalize_text(row.company), normalize_text(row.current_parent),
+            normalize_text(row.primary_offense), normalize_text(row.agency),
+            row.year, str(row.penalty_amount or ""),
         ]
     )
-    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
-    return f"vt:fingerprint:{digest}"
+    return "vt:fingerprint:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
 
 
 def _row_payload(row: ViolationTrackerRow) -> dict:
@@ -511,61 +479,76 @@ class ViolationTrackerSource(ResearchSource):
             )
         return response
 
+    def _failed_outcome(
+        self,
+        *,
+        query_name: str,
+        query_basis: str,
+        rows: list[ViolationTrackerRow],
+        attempts: list[dict],
+        pages_fetched: int,
+        had_valid_page: bool,
+        reported_count: int | None,
+        data_version: str | None,
+        status: SourceResultStatus,
+        warning: str,
+        http_status: int | None = None,
+    ) -> NameSearchOutcome:
+        return NameSearchOutcome(
+            query_name=query_name,
+            query_basis=query_basis,
+            rows=tuple(rows),
+            attempts=tuple(attempts),
+            complete=False,
+            had_valid_page=had_valid_page,
+            pages_fetched=pages_fetched,
+            reported_count=reported_count,
+            data_version=data_version,
+            error_status=status,
+            error_http_status=http_status,
+            warnings=(warning,),
+        )
+
     def _query_name(self, query_name: str, query_basis: str) -> NameSearchOutcome:
         queue: list[tuple[str, dict[str, str] | None]] = [
             (SEARCH_URL, {"company_op": "=", "company": query_name})
         ]
-        queued_urls: set[str] = set()
-        visited_urls: set[str] = set()
+        queued: set[str] = set()
+        visited: set[str] = set()
         rows: list[ViolationTrackerRow] = []
         attempts: list[dict] = []
-        warnings: list[str] = []
         reported_count: int | None = None
         data_version: str | None = None
-        raw_rows_seen = 0
         pages_fetched = 0
+        raw_rows_seen = 0
+        had_valid_page = False
 
         while queue and pages_fetched < MAX_PAGES_PER_NAME:
             request_url, params = queue.pop(0)
             try:
                 response = self._request(request_url, params=params)
             except ViolationTrackerFetchError as exc:
-                return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=False,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
-                    data_version=data_version,
-                    error_status=exc.status,
-                    error_http_status=exc.http_status,
-                    warnings=tuple([*warnings, str(exc)]),
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=exc.status, warning=str(exc), http_status=exc.http_status,
                 )
 
             final_url = str(response.url)
             if not _query_is_preserved(final_url, query_name):
-                return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=False,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
-                    data_version=data_version,
-                    error_status=SourceResultStatus.PARSER_FAILURE,
-                    error_http_status=response.status_code,
-                    warnings=tuple(
-                        [
-                            *warnings,
-                            "Violation Tracker did not preserve the exact company filter in the final response URL; the result was rejected rather than treated as a negative.",
-                        ]
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=SourceResultStatus.PARSER_FAILURE,
+                    warning=(
+                        "Violation Tracker did not preserve the exact company filter in the final response URL; "
+                        "the response was rejected rather than treated as a negative."
                     ),
+                    http_status=response.status_code,
                 )
 
-            visited_urls.add(final_url)
             parsed = parse_results_page(response.text)
             pages_fetched += 1
             data_version = parsed.data_version or data_version
@@ -583,153 +566,100 @@ class ViolationTrackerSource(ResearchSource):
             )
 
             if not parsed.layout_recognized:
-                return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=False,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
-                    data_version=data_version,
-                    error_status=SourceResultStatus.LAYOUT_CHANGED,
-                    error_http_status=response.status_code,
-                    warnings=tuple(
-                        [
-                            *warnings,
-                            "Violation Tracker returned HTML, but the expected result table/no-results marker was not recognized.",
-                        ]
-                    ),
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=SourceResultStatus.LAYOUT_CHANGED,
+                    warning="Violation Tracker's expected result table/no-results marker was not recognized.",
+                    http_status=response.status_code,
                 )
 
             if parsed.no_results:
                 if pages_fetched != 1 or rows:
-                    return NameSearchOutcome(
-                        query_name=query_name,
-                        query_basis=query_basis,
-                        rows=tuple(rows),
-                        attempts=tuple(attempts),
-                        complete=False,
-                        pages_fetched=pages_fetched,
-                        reported_count=reported_count,
-                        data_version=data_version,
-                        error_status=SourceResultStatus.PARSER_FAILURE,
-                        error_http_status=response.status_code,
-                        warnings=tuple([*warnings, "Violation Tracker returned an inconsistent no-results page."]),
+                    return self._failed_outcome(
+                        query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                        pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                        reported_count=reported_count, data_version=data_version,
+                        status=SourceResultStatus.PARSER_FAILURE,
+                        warning="Violation Tracker returned an inconsistent no-results page.",
+                        http_status=response.status_code,
                     )
                 return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=(),
-                    attempts=tuple(attempts),
-                    complete=True,
-                    pages_fetched=pages_fetched,
-                    reported_count=0,
-                    data_version=data_version,
-                    warnings=tuple(warnings),
+                    query_name=query_name, query_basis=query_basis, rows=(),
+                    attempts=tuple(attempts), complete=True, had_valid_page=True,
+                    pages_fetched=pages_fetched, reported_count=0, data_version=data_version,
                 )
 
             if parsed.result_count is None:
-                return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=False,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
-                    data_version=data_version,
-                    error_status=SourceResultStatus.LAYOUT_CHANGED,
-                    error_http_status=response.status_code,
-                    warnings=tuple([*warnings, "Violation Tracker result count could not be verified."]),
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=SourceResultStatus.LAYOUT_CHANGED,
+                    warning="Violation Tracker's result count could not be verified.",
+                    http_status=response.status_code,
                 )
-
             if reported_count is None:
                 reported_count = parsed.result_count
             elif reported_count != parsed.result_count:
-                return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=False,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
-                    data_version=data_version,
-                    error_status=SourceResultStatus.PARSER_FAILURE,
-                    error_http_status=response.status_code,
-                    warnings=tuple([*warnings, "Violation Tracker result count changed during pagination."]),
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=SourceResultStatus.PARSER_FAILURE,
+                    warning="Violation Tracker's result count changed during pagination.",
+                    http_status=response.status_code,
                 )
 
             for row in parsed.rows:
-                if not (
-                    _same_identity(row.company, query_name)
-                    or _same_identity(row.current_parent, query_name)
-                ):
-                    return NameSearchOutcome(
-                        query_name=query_name,
-                        query_basis=query_basis,
-                        rows=tuple(rows),
-                        attempts=tuple(attempts),
-                        complete=False,
-                        pages_fetched=pages_fetched,
-                        reported_count=reported_count,
-                        data_version=data_version,
-                        error_status=SourceResultStatus.PARSER_FAILURE,
-                        error_http_status=response.status_code,
-                        warnings=tuple(
-                            [
-                                *warnings,
-                                "Violation Tracker returned a row that matched neither the searched company nor its current-parent field; the filter may have been ignored, so the query was rejected.",
-                            ]
+                if not (_same_identity(row.company, query_name) or _same_identity(row.current_parent, query_name)):
+                    return self._failed_outcome(
+                        query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                        pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                        reported_count=reported_count, data_version=data_version,
+                        status=SourceResultStatus.PARSER_FAILURE,
+                        warning=(
+                            "Violation Tracker returned a row matching neither the searched company nor its "
+                            "current-parent field; the filter may have been ignored, so the query was rejected."
                         ),
+                        http_status=response.status_code,
                     )
 
+            had_valid_page = True
             rows.extend(parsed.rows)
             raw_rows_seen += len(parsed.rows)
+            visited.add(final_url)
             if raw_rows_seen >= reported_count:
                 return NameSearchOutcome(
-                    query_name=query_name,
-                    query_basis=query_basis,
-                    rows=tuple(rows),
-                    attempts=tuple(attempts),
-                    complete=True,
-                    pages_fetched=pages_fetched,
-                    reported_count=reported_count,
+                    query_name=query_name, query_basis=query_basis, rows=tuple(rows),
+                    attempts=tuple(attempts), complete=True, had_valid_page=True,
+                    pages_fetched=pages_fetched, reported_count=reported_count,
                     data_version=data_version,
-                    warnings=tuple(warnings),
                 )
 
             for page_url in parsed.pagination_urls:
-                if not _query_is_preserved(page_url, query_name):
-                    continue
-                if page_url in visited_urls or page_url in queued_urls:
-                    continue
-                queued_urls.add(page_url)
-                queue.append((page_url, None))
+                if (
+                    _query_is_preserved(page_url, query_name)
+                    and page_url not in visited
+                    and page_url not in queued
+                ):
+                    queued.add(page_url)
+                    queue.append((page_url, None))
             queue.sort(key=lambda item: _page_number(item[0]))
-
-            if not queue and raw_rows_seen < reported_count:
-                warnings.append(
-                    f"Violation Tracker reported {reported_count} results for {query_name!r}, but only {raw_rows_seen} rows could be reached from pagination links."
-                )
+            if not queue:
                 break
 
-        if raw_rows_seen < (reported_count or 0):
-            warnings.append(
-                f"Violation Tracker pagination was not exhausted within the {MAX_PAGES_PER_NAME}-page safety cap for {query_name!r}."
-            )
-        return NameSearchOutcome(
-            query_name=query_name,
-            query_basis=query_basis,
-            rows=tuple(rows),
-            attempts=tuple(attempts),
-            complete=False,
-            pages_fetched=pages_fetched,
-            reported_count=reported_count,
-            data_version=data_version,
-            error_status=SourceResultStatus.PAGINATION_INCOMPLETE,
-            warnings=tuple(warnings),
+        return self._failed_outcome(
+            query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+            pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+            reported_count=reported_count, data_version=data_version,
+            status=SourceResultStatus.PAGINATION_INCOMPLETE,
+            warning=(
+                f"Violation Tracker pagination for {query_name!r} was incomplete: "
+                f"{raw_rows_seen} of {reported_count or 'unknown'} reported rows were verified "
+                f"within the {MAX_PAGES_PER_NAME}-page safety cap."
+            ),
         )
 
     def search(self, contractor: ContractorContext) -> SourceResult:
@@ -767,50 +697,44 @@ class ViolationTrackerSource(ResearchSource):
         for outcome in outcomes:
             for row in outcome.rows:
                 if _same_identity(row.company, outcome.query_name):
-                    match_basis = "penalized_company"
-                    rank = 2
+                    match_basis, rank = "penalized_company", 2
                 elif _same_identity(row.current_parent, outcome.query_name):
-                    match_basis = "current_parent_only"
-                    rank = 1
+                    match_basis, rank = "current_parent_only", 1
                 else:
-                    match_basis = "unverified"
-                    rank = 0
+                    match_basis, rank = "unverified", 0
                 record_id = _record_id(row)
-                candidate = {
+                item = {
                     **_row_payload(row),
                     "query_name": outcome.query_name,
                     "query_basis": outcome.query_basis,
                     "match_basis": match_basis,
+                    "_rank": rank,
                 }
-                existing = candidates.get(record_id)
-                if existing is None or rank > int(existing["_rank"]):
-                    candidates[record_id] = {**candidate, "_rank": rank}
+                if record_id not in candidates or rank > candidates[record_id]["_rank"]:
+                    candidates[record_id] = item
 
-        direct_records = [
-            {key: value for key, value in item.items() if key != "_rank"}
-            for item in candidates.values()
-            if item["_rank"] == 2
-        ]
-        parent_only_records = [
-            {key: value for key, value in item.items() if key != "_rank"}
-            for item in candidates.values()
-            if item["_rank"] == 1
-        ]
-        unverified_records = [
-            {key: value for key, value in item.items() if key != "_rank"}
-            for item in candidates.values()
-            if item["_rank"] == 0
-        ]
+        def records_at(rank: int) -> list[dict]:
+            return [
+                {key: value for key, value in item.items() if key != "_rank"}
+                for item in candidates.values()
+                if item["_rank"] == rank
+            ]
 
+        direct_records = records_at(2)
+        parent_only_records = records_at(1)
+        unverified_records = records_at(0)
         all_complete = all(outcome.complete for outcome in outcomes)
-        any_valid_page = any(outcome.pages_fetched > 0 for outcome in outcomes)
-        failed_queries = [outcome for outcome in outcomes if not outcome.complete]
+        any_complete_query = any(outcome.complete for outcome in outcomes)
+        any_partial_evidence = any(outcome.had_valid_page and outcome.rows for outcome in outcomes)
+        failed = [outcome for outcome in outcomes if not outcome.complete]
 
         if not all_complete:
-            status = SourceResultStatus.PARTIAL_RESULTS if any_valid_page else (
-                failed_queries[0].error_status or SourceResultStatus.SOURCE_UNAVAILABLE
-            )
-            completeness = CompletenessStatus.PARTIAL if any_valid_page else CompletenessStatus.UNKNOWN
+            if any_complete_query or any_partial_evidence:
+                status = SourceResultStatus.PARTIAL_RESULTS
+                completeness = CompletenessStatus.PARTIAL
+            else:
+                status = failed[0].error_status or SourceResultStatus.SOURCE_UNAVAILABLE
+                completeness = CompletenessStatus.UNKNOWN
         elif direct_records:
             status = SourceResultStatus.SUCCESS_WITH_FINDINGS
             completeness = CompletenessStatus.COMPLETE
@@ -833,11 +757,13 @@ class ViolationTrackerSource(ResearchSource):
 
         evidence: list[EvidenceRecord] = []
         for record in direct_records:
-            summary_parts = [record["primary_offense"], record["year"], record["penalty"]]
+            summary = " | ".join(
+                part for part in [record["primary_offense"], record["year"], record["penalty"]] if part
+            )
             evidence.append(
                 EvidenceRecord(
                     field_name="violation_tracker",
-                    observed_value=" | ".join(part for part in summary_parts if part),
+                    observed_value=summary or "Violation Tracker record found",
                     source_record_id=record["source_record_id"],
                     source_url=record["detail_url"] or None,
                     details={
@@ -847,7 +773,6 @@ class ViolationTrackerSource(ResearchSource):
                     },
                 )
             )
-
         if not direct_records and parent_only_records:
             first = parent_only_records[0]
             evidence.append(
@@ -867,19 +792,23 @@ class ViolationTrackerSource(ResearchSource):
 
         first_record = (direct_records or parent_only_records or unverified_records or [None])[0]
         source_url = (
-            first_record.get("detail_url")
+            (first_record.get("detail_url") or first_record.get("parent_url"))
             if first_record
             else (attempts[0]["url"] if attempts else SEARCH_URL)
         )
         source_record_id = first_record.get("source_record_id") if first_record else None
 
+        if all_complete and direct_records:
+            classification = "MATCH"
+        elif all_complete and (parent_only_records or unverified_records):
+            classification = "AMBIGUOUS"
+        elif all_complete:
+            classification = "NO_MATCH"
+        else:
+            classification = "PARTIAL_OR_FAILED"
+
         payload = {
-            "classification": (
-                "MATCH" if direct_records and all_complete
-                else "AMBIGUOUS" if not direct_records and (parent_only_records or unverified_records) and all_complete
-                else "NO_MATCH" if all_complete
-                else "PARTIAL_OR_FAILED"
-            ),
+            "classification": classification,
             "approved_names_searched": [
                 {"name": name, "basis": basis} for name, basis in approved_names
             ],
@@ -888,6 +817,7 @@ class ViolationTrackerSource(ResearchSource):
                     "query_name": outcome.query_name,
                     "query_basis": outcome.query_basis,
                     "complete": outcome.complete,
+                    "had_valid_page": outcome.had_valid_page,
                     "pages_fetched": outcome.pages_fetched,
                     "reported_count": outcome.reported_count,
                     "data_version": outcome.data_version,
@@ -911,7 +841,7 @@ class ViolationTrackerSource(ResearchSource):
 
         if status == SourceResultStatus.AMBIGUOUS_MATCH:
             warnings.append(
-                "Violation Tracker returned records only through a current-parent relationship; these are not treated as violations of the bidder without human identity review."
+                "Violation Tracker returned records only through a current-parent relationship; they are not treated as bidder violations without human identity review."
             )
         if status == SourceResultStatus.PARTIAL_RESULTS:
             warnings.append(
