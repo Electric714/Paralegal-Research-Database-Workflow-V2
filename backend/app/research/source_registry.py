@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from .sources.base import ResearchSource
-from .sources.sam_exclusions import SamExclusionsSource
+from .sources.sam_uploaded import SamUploadedExclusionsSource
 
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
-    "sam": SamExclusionsSource,
+    "sam": SamUploadedExclusionsSource,
 }
 
 
