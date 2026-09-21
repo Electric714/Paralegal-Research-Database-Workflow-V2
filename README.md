@@ -43,13 +43,13 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
+- [ ] **U.S. Department of Labor Enforcement Data** — research/design branch `research/dol-enforcement-data`. The retired enforcement-data page has been replaced by DOL's Open Data Portal/v4 API. WHD enforcement is the recommended Phase 1 dataset; implementation and field-ownership confirmation remain. See `docs/sources/DOL_ENFORCEMENT.md`
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
 - [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
 - [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
-- [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
@@ -111,7 +111,7 @@ These are the primary sites the firm's staff currently checks:
 7. Better Business Bureau — http://www.bbb.org/wisconsin
 8. Violation Tracker — https://violationtracker.goodjobsfirst.org/
 9. Wisconsin DOT contractor information — http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx
-10. U.S. Department of Labor Enforcement Data — https://enforcedata.dol.gov/views/data_catalogs.php
+10. U.S. Department of Labor Enforcement Data — https://data.dol.gov/ (replacement for the retired enforcedata.dol.gov page)
 11. GSA OIG state suspension/debarment directory — https://www.gsaig.gov/content/suspension-and-debarment-sites-state
 12. Minnesota debarred vendors — http://www.mmd.admin.state.mn.us/debarredreport.asp
 13. Responsible Minnesota — http://responsiblemn.org/
