@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import database as db
 from .research.models import SourceResultStatus
@@ -29,7 +29,7 @@ class WccaOperatorResultRequest(BaseModel):
     bidder_id: int
     searched_names: list[str]
     outcome: str
-    cases: list[WccaCaseInput] = []
+    cases: list[WccaCaseInput] = Field(default_factory=list)
     operator_note: str | None = None
     operator_confirmed_complete: bool = False
     identity_confirmed: bool = False
