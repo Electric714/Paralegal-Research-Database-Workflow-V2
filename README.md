@@ -39,7 +39,7 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
 - [ ] **OSHA** — OSHA Establishment Search adapter from PR #5 is merged to `main`; CI passes and the source picker is ready. Final representative real-bidder/end-to-end verification remains before marking the source complete
-- [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
+- [ ] **BBB** — Targeted business-profile research is implemented on `main`; post-merge hardening is in PR #14. Intended owned field: `better_business_bureau_complaints`. Final representative real-bidder/end-to-end verification remains before marking the source complete
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
@@ -48,11 +48,11 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 ### To Do
 
-- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
+- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still needs confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
 - [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
-- [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still need confirmation
+- [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
 - [ ] **Research Run Summary Dashboard** — show completed, no-match, ambiguous, partial, blocked, and failed counts together
 - [ ] **Retry / Re-run Controls** — operator-friendly retry of failed or partial source tasks without duplicating evidence
@@ -108,7 +108,7 @@ These are the primary sites the firm's staff currently checks:
 4. Wisconsin Circuit Court Access / CCAP — https://wcca.wicourts.gov/index.xsl
 5. PACER — https://pacer.login.uscourts.gov/csologin/login.jsf
 6. SAM.gov — https://www.sam.gov/SAM/
-7. Better Business Bureau — http://www.bbb.org/wisconsin
+7. Better Business Bureau — https://www.bbb.org/
 8. Violation Tracker — https://violationtracker.goodjobsfirst.org/
 9. Wisconsin DOT contractor information — http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx
 10. U.S. Department of Labor Enforcement Data — https://enforcedata.dol.gov/views/data_catalogs.php
