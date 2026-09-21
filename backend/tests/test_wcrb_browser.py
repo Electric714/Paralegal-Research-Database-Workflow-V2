@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+
 from app.research.field_mappings import source_owns_field
 from app.research.sources.wcrb_browser import (
+    WcrbEnvironmentError,
+    WcrbProbeError,
+    _normalize_playwright_error,
+    _persist_failure,
     _redact_hidden_input_values,
     _safe_request_url,
     browser_request_decision,
@@ -119,6 +125,51 @@ def test_unquoted_hidden_input_value_is_redacted():
     sanitized = _redact_hidden_input_values(html)
     assert "abc123" not in sanitized
     assert '[redacted]' in sanitized
+
+
+def test_missing_chromium_error_is_classified_as_environment_error():
+    error = _normalize_playwright_error(
+        RuntimeError("BrowserType.launch: Executable doesn't exist at C:/runtime/chromium.exe")
+    )
+    assert isinstance(error, WcrbEnvironmentError)
+    assert "WCRB_PROBE.ps1" in str(error)
+
+
+def test_failure_persistence_writes_diagnostics_requests_and_manifest(tmp_path):
+    error = WcrbProbeError(
+        "Failed at https://www.wcrb.org/coverage-lookup/Default.aspx?token=super-secret"
+    )
+    request_log = [
+        {
+            "method": "POST",
+            "url": "https://www.wcrb.org/coverage-lookup/Default.aspx",
+            "resource_type": "document",
+            "allowed": True,
+            "reason": "wcrb_coverage_lookup_post",
+        }
+    ]
+    blocked = []
+
+    _persist_failure(
+        output_dir=tmp_path,
+        contractor_name="Example Contractor LLC",
+        stage="submitting_employer_search",
+        error=error,
+        request_log=request_log,
+        blocked_requests=blocked,
+        page=None,
+    )
+
+    diagnostics = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
+    requests = json.loads((tmp_path / "requests.json").read_text(encoding="utf-8"))
+    artifacts = json.loads((tmp_path / "artifacts.json").read_text(encoding="utf-8"))
+
+    assert diagnostics["status"] == "failed"
+    assert diagnostics["stage"] == "submitting_employer_search"
+    assert "super-secret" not in diagnostics["error"]
+    assert requests["requests"] == request_log
+    assert {item["name"] for item in artifacts} >= {"diagnostics.json", "requests.json"}
+    assert getattr(error, "output_dir") == str(tmp_path)
 
 
 def test_wcrb_can_own_wc_but_not_wc_date_until_semantics_are_confirmed():
