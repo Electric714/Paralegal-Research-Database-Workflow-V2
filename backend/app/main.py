@@ -17,6 +17,7 @@ from . import database as db
 from .import_validation import ValidationReport, validate_bidder_rows
 from .research.executor import execute_research_run
 from .research.field_mappings import SOURCE_FIELD_MAPPINGS
+from .research.identity_review import list_identity_review_items, resolve_identity_review
 from .research.service import list_tasks, record_identity_judgment, review_change
 from .research.sources.sam_exclusions import (
     MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
@@ -66,6 +67,13 @@ class IdentityJudgmentRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     decided_by: str | None = None
     notes: str | None = None
+
+
+class IdentityReviewResolutionRequest(BaseModel):
+    source_record_id: str
+    judgment: str
+    actor: str | None = None
+    note: str | None = None
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -147,12 +155,15 @@ def schema():
 def dashboard():
     active = db.active_import()
     reviews = db.list_review_proposals()
+    identity_reviews = list_identity_review_items()
     runs = db.list_runs(1)
     return {
         "bidder_count": db.count_bidders(),
         "source_count": len(SOURCES),
         "implemented_source_count": sum(1 for source in SOURCES if source["status"] == "ready"),
-        "pending_review_count": sum(1 for item in reviews if item["status"] == "pending"),
+        "pending_review_count": sum(1 for item in reviews if item["status"] == "pending") + len(identity_reviews),
+        "pending_change_count": sum(1 for item in reviews if item["status"] == "pending"),
+        "pending_identity_count": len(identity_reviews),
         "active_import": active,
         "last_run": runs[0] if runs else None,
     }
@@ -342,6 +353,20 @@ def runs():
 @app.get("/api/tasks")
 def tasks(research_run_id: int | None = None):
     return {"items": list_tasks(research_run_id)}
+
+
+@app.get("/api/identity-review")
+def identity_review_queue(limit: int = Query(200, ge=1, le=1000)):
+    return {"items": list_identity_review_items(limit)}
+
+
+@app.post("/api/identity-review/{snapshot_id}")
+def resolve_identity(snapshot_id: int, payload: IdentityReviewResolutionRequest):
+    try:
+        item = resolve_identity_review(snapshot_id=snapshot_id, **payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"item": item}
 
 
 @app.post("/api/identity-judgments")
