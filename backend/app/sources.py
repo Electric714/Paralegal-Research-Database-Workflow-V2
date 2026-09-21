@@ -12,7 +12,7 @@ SOURCES = [
     {"key": "wisdot", "name": "Wisconsin DOT Contractor Information", "url": "https://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx", "category": "Contractor eligibility / debarment · automatic official PDF refresh", "status": "ready"},
     {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://enforcedata.dol.gov/views/data_catalogs.php", "category": "Labor enforcement", "status": "not_implemented"},
     {"key": "gsa_state_debarment", "name": "GSA OIG State Suspension & Debarment Directory", "url": "https://www.gsaig.gov/content/suspension-and-debarment-sites-state", "category": "State debarment directory", "status": "not_implemented"},
-    {"key": "mn_debarment", "name": "Minnesota Debarred Vendors", "url": "http://www.mmd.admin.state.mn.us/debarredreport.asp", "category": "State debarment", "status": "not_implemented"},
+    {"key": "mn_debarment", "name": "Minnesota Suspended/Debarred Vendors", "url": "https://mn.gov/admin/osp/government/suspended-debarred/", "category": "State suspension / debarment", "status": "ready"},
     {"key": "responsible_mn", "name": "Responsible Minnesota", "url": "http://responsiblemn.org/", "category": "Contractor responsibility", "status": "not_implemented"},
     {"key": "mn_pca", "name": "Minnesota PCA Enforcement Actions", "url": "https://www.pca.state.mn.us/regulations/quarterly-summary-enforcement-actions", "category": "Environmental enforcement", "status": "not_implemented"},
 ]
