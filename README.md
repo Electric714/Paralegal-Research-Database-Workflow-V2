@@ -2,15 +2,21 @@
 
 ## Quick Start — Windows
 
-For the current proof of concept, install **Python 3** and the current **Node.js LTS** release once. Then download/clone the repository and double-click:
+For the proof of concept, the user should not need to install Python, Node.js, npm, or project dependencies manually.
+
+Download or clone the repository, then double-click:
 
 **`START_HERE.bat`**
 
-The launcher will create a Python virtual environment, install backend dependencies, install frontend dependencies if needed, start the FastAPI backend and React frontend in separate PowerShell windows, and open the application automatically at:
+On first launch, the project bootstraps everything it needs locally inside the repository: a local `uv` bootstrap tool, a project-local Python 3.12 runtime, the `.venv` virtual environment, a portable Node.js runtime, backend dependencies, and frontend dependencies. Nothing is installed system-wide. The only requirements are Windows, PowerShell, and an internet connection for the initial setup/dependency downloads.
+
+The launcher then starts the FastAPI backend and React frontend in separate PowerShell windows and opens the application automatically at:
 
 **http://127.0.0.1:5173**
 
 Keep both PowerShell windows open while testing. The backend API runs at `http://127.0.0.1:8000`.
+
+Downloaded runtimes live under `.runtime/`, the Python virtual environment lives under `.venv/`, and both are ignored by Git. Later launches reuse them.
 
 For this milestone, the 14 research sources are intentionally present as **Not Implemented**. The purpose of the current build is to test the application shell, bidder CSV import/export, database browsing, research-run setup, review workflow scaffolding, source catalog, and diagnostics console before implementing each external source one at a time.
 
