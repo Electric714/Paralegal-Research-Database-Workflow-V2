@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import database as db
@@ -94,6 +95,15 @@ def health():
     return {"name": APP_NAME, "status": "ok", "version": "0.1.0"}
 
 
+@app.get("/api/schema")
+def schema():
+    return {
+        "expected_columns": EXPECTED_COLUMNS,
+        "column_count": len(EXPECTED_COLUMNS),
+        "core_columns": sorted(CORE_COLUMNS),
+    }
+
+
 @app.get("/api/dashboard")
 def dashboard():
     active = db.active_import()
@@ -144,9 +154,21 @@ async def import_master(file: UploadFile = File(...)):
         "INFO",
         "Master bidder database imported",
         stage="import",
-        details={"import_id": import_id, "filename": original, "rows": len(rows), "missing_expected_columns": missing},
+        details={
+            "import_id": import_id,
+            "filename": original,
+            "rows": len(rows),
+            "columns": columns,
+            "missing_expected_columns": missing,
+        },
     )
-    return {"import_id": import_id, "filename": original, "row_count": len(rows), "columns": columns, "missing_expected_columns": missing}
+    return {
+        "import_id": import_id,
+        "filename": original,
+        "row_count": len(rows),
+        "columns": columns,
+        "missing_expected_columns": missing,
+    }
 
 
 @app.get("/api/import/current")
@@ -180,7 +202,11 @@ def export_master():
     for row in rows:
         writer.writerow({column: row.get(column, "") for column in active["columns"]})
     filename = f"approved_bidder_database_export_{active['id']}.csv"
-    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/runs")
@@ -227,4 +253,15 @@ def clear_diagnostics():
 def export_diagnostics():
     payload = {"application": APP_NAME, "diagnostics": db.list_diagnostics(5000)}
     text = json.dumps(payload, indent=2, ensure_ascii=False)
-    return StreamingResponse(iter([text]), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paralegal-research-diagnostics.json"'})
+    return StreamingResponse(
+        iter([text]),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="paralegal-research-diagnostics.json"'},
+    )
+
+
+# In normal local use the launcher builds the React application first. Serving it
+# here means the user runs one local server, not separate backend/frontend windows.
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
