@@ -40,14 +40,14 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
 - [ ] **OSHA** — OSHA Establishment Search adapter from PR #5 is merged to `main`; CI passes and the source picker is ready. Final representative real-bidder/end-to-end verification remains before marking the source complete
 - [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
-- [ ] **WCRB** — Wisconsin Compensation Rating Bureau. Branch: `research/wcrb-integration-spike`. Playwright/Chromium acquisition spike in progress; normal same-origin Coverage Lookup POSTs are allowed. Intended owned fields: `wc`, `wc_date`
+- [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
+- [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
+- [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
-- [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
-- [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
 - [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — determine authoritative structured/downloadable acquisition and exact field mappings
 - [ ] **GSA State Suspension / Debarment Directory** — treat primarily as a directory/meta-source unless direct contractor-level data is identified
