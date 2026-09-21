@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .sources.base import ResearchSource
 from .sources.bbb import BbbBusinessProfileSource
+from .sources.mn_debarment import MinnesotaDebarredVendorsSource
 from .sources.osha import OshaEstablishmentSource
 from .sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources.violation_tracker import ViolationTrackerSource
@@ -12,6 +13,7 @@ from .sources.wisdot import WisdotContractorSource
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "bbb": BbbBusinessProfileSource,
+    "mn_debarment": MinnesotaDebarredVendorsSource,
     "osha": OshaEstablishmentSource,
     "sam": SamUploadedExclusionsSource,
     "violation_tracker": ViolationTrackerSource,
