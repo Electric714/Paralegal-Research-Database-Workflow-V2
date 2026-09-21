@@ -12,6 +12,8 @@ backend/data/*.db
 backend/data/*.db-*
 backend/data/imports/*
 !backend/data/imports/.gitkeep
+backend/data/evidence/*
+!backend/data/evidence/.gitkeep
 
 # Node / Vite
 frontend/node_modules/

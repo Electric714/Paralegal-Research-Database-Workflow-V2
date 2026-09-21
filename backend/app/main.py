@@ -11,9 +11,12 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import database as db
+from .import_validation import ValidationReport, validate_bidder_rows
+from .research.field_mappings import SOURCE_FIELD_MAPPINGS
+from .research.service import list_tasks, record_identity_judgment, review_change
 from .sources import SOURCES, SOURCE_KEYS
 
 APP_NAME = "Paralegal Research Desk"
@@ -28,7 +31,7 @@ EXPECTED_COLUMNS = [
     "dwd_substance_abuse_plan", "better_business_bureau_complaints", "misc_violations", "tax_liability",
 ]
 
-app = FastAPI(title=APP_NAME, version="0.1.0")
+app = FastAPI(title=APP_NAME, version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -46,6 +49,22 @@ def startup() -> None:
 class RunRequest(BaseModel):
     source_keys: list[str]
     bidder_ids: list[int] | None = None
+
+
+class IdentityJudgmentRequest(BaseModel):
+    bidder_id: int
+    source_key: str
+    source_record_id: str
+    judgment: str
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    decided_by: str | None = None
+    notes: str | None = None
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str
+    actor: str | None = None
+    note: str | None = None
 
 
 def _decode_csv(data: bytes) -> str:
@@ -82,17 +101,26 @@ def _parse_csv(data: bytes) -> tuple[list[str], list[dict[str, str]]]:
         row = {column: (raw.get(column) or "").strip() for column in columns}
         if not any(row.values()):
             continue
-        if not row.get("contractor_name"):
-            raise HTTPException(422, f"Row {index} is missing contractor_name.")
         rows.append(row)
     if not rows:
         raise HTTPException(422, "The CSV contains no bidder records.")
     return columns, rows
 
 
+def _validate_import(columns: list[str], rows: list[dict[str, str]]) -> ValidationReport:
+    report = validate_bidder_rows(columns, rows)
+    missing_expected = [column for column in EXPECTED_COLUMNS if column not in columns]
+    if missing_expected:
+        report.errors.insert(
+            0,
+            "Missing expected bidder field(s): " + ", ".join(missing_expected),
+        )
+    return report
+
+
 @app.get("/api/health")
 def health():
-    return {"name": APP_NAME, "status": "ok", "version": "0.1.0"}
+    return {"name": APP_NAME, "status": "ok", "version": "0.2.0"}
 
 
 @app.get("/api/schema")
@@ -101,6 +129,10 @@ def schema():
         "expected_columns": EXPECTED_COLUMNS,
         "column_count": len(EXPECTED_COLUMNS),
         "core_columns": sorted(CORE_COLUMNS),
+        "source_field_mappings": {
+            key: {"owned_fields": sorted(mapping.owned_fields), "notes": mapping.notes}
+            for key, mapping in SOURCE_FIELD_MAPPINGS.items()
+        },
     }
 
 
@@ -128,12 +160,16 @@ def sources():
 async def preview_import(file: UploadFile = File(...)):
     data = await file.read()
     columns, rows = _parse_csv(data)
+    report = _validate_import(columns, rows)
     return {
         "filename": file.filename or "upload.csv",
         "row_count": len(rows),
         "columns": columns,
         "missing_expected_columns": [col for col in EXPECTED_COLUMNS if col not in columns],
         "extra_columns": [col for col in columns if col not in EXPECTED_COLUMNS],
+        "validation_errors": report.errors,
+        "validation_warnings": report.warnings,
+        "valid_for_import": report.valid,
         "preview": rows[:5],
     }
 
@@ -142,6 +178,10 @@ async def preview_import(file: UploadFile = File(...)):
 async def import_master(file: UploadFile = File(...)):
     data = await file.read()
     columns, rows = _parse_csv(data)
+    report = _validate_import(columns, rows)
+    if not report.valid:
+        raise HTTPException(422, {"message": "Bidder CSV validation failed.", "errors": report.errors})
+
     db.ensure_dirs()
     original = Path(file.filename or "master.csv").name
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original)
@@ -149,7 +189,6 @@ async def import_master(file: UploadFile = File(...)):
     snapshot = db.IMPORT_DIR / snapshot_name
     snapshot.write_bytes(data)
     import_id = db.replace_master_database(original, columns, rows, str(snapshot))
-    missing = [col for col in EXPECTED_COLUMNS if col not in columns]
     db.add_diagnostic(
         "INFO",
         "Master bidder database imported",
@@ -159,7 +198,7 @@ async def import_master(file: UploadFile = File(...)):
             "filename": original,
             "rows": len(rows),
             "columns": columns,
-            "missing_expected_columns": missing,
+            "validation_warnings": report.warnings,
         },
     )
     return {
@@ -167,7 +206,7 @@ async def import_master(file: UploadFile = File(...)):
         "filename": original,
         "row_count": len(rows),
         "columns": columns,
-        "missing_expected_columns": missing,
+        "validation_warnings": report.warnings,
     }
 
 
@@ -217,9 +256,13 @@ def create_run(payload: RunRequest):
     if unknown:
         raise HTTPException(422, f"Unknown source key(s): {', '.join(unknown)}")
     if payload.bidder_ids:
-        valid = [bidder_id for bidder_id in payload.bidder_ids if db.get_bidder(bidder_id)]
+        valid = [
+            bidder_id
+            for bidder_id in payload.bidder_ids
+            if (item := db.get_bidder(bidder_id)) and item.get("_active")
+        ]
         if len(valid) != len(payload.bidder_ids):
-            raise HTTPException(422, "One or more selected bidders do not exist.")
+            raise HTTPException(422, "One or more selected bidders do not exist in the active master database.")
         bidder_count = len(valid)
     else:
         bidder_count = db.count_bidders()
@@ -233,9 +276,33 @@ def runs():
     return {"items": db.list_runs()}
 
 
+@app.get("/api/tasks")
+def tasks(research_run_id: int | None = None):
+    return {"items": list_tasks(research_run_id)}
+
+
+@app.post("/api/identity-judgments")
+def identity_judgment(payload: IdentityJudgmentRequest):
+    if payload.source_key not in SOURCE_KEYS:
+        raise HTTPException(422, "Unknown source key.")
+    try:
+        judgment_id = record_identity_judgment(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"id": judgment_id}
+
+
 @app.get("/api/review")
 def review_queue():
     return {"items": db.list_review_proposals()}
+
+
+@app.post("/api/review/{change_id}")
+def review_decision(change_id: int, payload: ReviewDecisionRequest):
+    try:
+        return {"item": review_change(change_id, **payload.model_dump())}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/diagnostics")
