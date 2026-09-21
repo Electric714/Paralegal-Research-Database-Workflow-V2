@@ -40,11 +40,11 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **SAM.gov** — Public Exclusions V2 CSV/ZIP workflow and identity-matching hardening are merged; final operator/end-to-end verification of the preferred manual extract workflow remains
 - [ ] **OSHA** — OSHA Establishment Search adapter is in PR #5 (`feature/osha-establishment-research`); merge/reconciliation and real bidder verification remain
 - [ ] **BBB** — Better Business Bureau. Branch: `feature/bbb-targeted-research`. Intended owned field: `better_business_bureau_complaints`
+- [ ] **WCRB** — Wisconsin Compensation Rating Bureau. Branch: `research/wcrb-integration-spike`. Playwright/Chromium acquisition spike in progress; normal same-origin Coverage Lookup POSTs are allowed. Intended owned fields: `wc`, `wc_date`
 - [ ] **Review / Diagnostics UI Polish** — continue improving the end-to-end review and diagnostics experience as real sources are integrated
 
 ### To Do
 
-- [ ] **WCRB — Next Site** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — Wisconsin Circuit Court Access; intended owned fields: `circuit_court`, `ccap_show150`
 - [ ] **PACER** — federal court records; intended owned field: `federal_court`; authenticated/possibly fee-sensitive workflow needs explicit design first
 - [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
