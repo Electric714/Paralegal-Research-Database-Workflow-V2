@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Database,
   Download,
+  ExternalLink,
   FileSearch,
   LayoutDashboard,
   ListChecks,
@@ -18,11 +19,12 @@ import {
   ShieldCheck,
   Upload,
   X,
+  XCircle,
 } from "lucide-react";
 import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type Page = "dashboard" | "database" | "research" | "review" | "sources" | "activity";
-type Bidder = Record<string, string | number> & { _internal_id: number };
+type Bidder = Record<string, string | number | boolean> & { _internal_id: number };
 type Source = { key: string; name: string; url: string; category: string; status: string };
 type Diagnostic = {
   id: number;
@@ -48,6 +50,8 @@ type DashboardData = {
   source_count: number;
   implemented_source_count: number;
   pending_review_count: number;
+  pending_change_count?: number;
+  pending_identity_count?: number;
   active_import: null | { filename: string; imported_at: string; row_count: number; columns: string[] };
   last_run: Run | null;
 };
@@ -57,7 +61,55 @@ type ImportPreview = {
   columns: string[];
   missing_expected_columns: string[];
   extra_columns: string[];
+  validation_errors: string[];
+  validation_warnings: string[];
+  valid_for_import: boolean;
   preview: Record<string, string>[];
+};
+type ReviewItem = {
+  id: number;
+  contractor_name: string;
+  field_name: string;
+  current_value?: string | null;
+  proposed_value?: string | null;
+  source_key: string;
+  source_url?: string | null;
+  identity_status?: string;
+  completeness_status?: string;
+  result_status?: string;
+  status: string;
+};
+type IdentityCandidate = {
+  source_record_id: string;
+  score: number;
+  name_score: number;
+  address_score: number;
+  city_score: number;
+  state_score: number;
+  matched_search_name?: string;
+  matched_record_name?: string;
+  record: Record<string, string>;
+};
+type IdentityReviewItem = {
+  snapshot_id: number;
+  research_run_id: number;
+  research_task_id: number;
+  bidder_id: number;
+  contractor_name: string;
+  source_key: string;
+  retrieved_at: string;
+  result_status: string;
+  completeness_status: string;
+  warnings: string[];
+  candidates: IdentityCandidate[];
+};
+type SamStatus = {
+  source_key: string;
+  implemented: boolean;
+  api_key_configured: boolean;
+  cached_extract: string | null;
+  cached_extract_date: string | null;
+  cached_record_count: number;
 };
 
 const API = import.meta.env.VITE_API_URL || "";
@@ -99,7 +151,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     let message = `Request failed (${response.status})`;
     try {
       const body = await response.json();
-      message = body.detail || message;
+      const detail = body.detail;
+      if (typeof detail === "string") message = detail;
+      else if (detail?.message) message = String(detail.message);
+      else if (detail) message = JSON.stringify(detail);
     } catch {
       // Keep fallback message.
     }
@@ -126,6 +181,11 @@ function formatDate(value?: string | null) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function formatPercent(value?: number | null) {
+  if (value === undefined || value === null || Number.isNaN(value)) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
 function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <section className={`card ${className}`}>{children}</section>;
 }
@@ -137,7 +197,8 @@ export default function App() {
   const [bidders, setBidders] = useState<Bidder[]>([]);
   const [bidderTotal, setBidderTotal] = useState(0);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [reviewItems, setReviewItems] = useState<any[]>([]);
+  const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
+  const [identityReviewItems, setIdentityReviewItems] = useState<IdentityReviewItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -149,17 +210,30 @@ export default function App() {
   const [error, setError] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [samStatus, setSamStatus] = useState<SamStatus | null>(null);
+  const [samMessage, setSamMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const samInput = useRef<HTMLInputElement>(null);
+
+  const refreshSamStatus = async () => {
+    try {
+      const data = await request<{ item: SamStatus }>("/api/sources/sam/status");
+      setSamStatus(data.item);
+    } catch {
+      setSamStatus(null);
+    }
+  };
 
   const refresh = async () => {
     setError("");
     try {
-      const [dashboardData, sourceData, bidderData, runData, reviewData, diagnosticData] = await Promise.all([
+      const [dashboardData, sourceData, bidderData, runData, reviewData, identityData, diagnosticData] = await Promise.all([
         request<DashboardData>("/api/dashboard"),
         request<{ items: Source[] }>("/api/sources"),
         request<{ items: Bidder[]; total: number }>(`/api/bidders?search=${encodeURIComponent(search)}&limit=250`),
         request<{ items: Run[] }>("/api/runs"),
-        request<{ items: any[] }>("/api/review"),
+        request<{ items: ReviewItem[] }>("/api/review"),
+        request<{ items: IdentityReviewItem[] }>("/api/identity-review"),
         request<{ items: Diagnostic[] }>("/api/diagnostics"),
       ]);
       setDashboard(dashboardData);
@@ -168,8 +242,13 @@ export default function App() {
       setBidderTotal(bidderData.total);
       setRuns(runData.items);
       setReviewItems(reviewData.items);
+      setIdentityReviewItems(identityData.items);
       setDiagnostics(diagnosticData.items);
-      setSelectedSources((current) => current.length ? current : sourceData.items.map((source) => source.key));
+      setSelectedSources((current) => {
+        const ready = sourceData.items.filter((source) => source.status === "ready").map((source) => source.key);
+        const filtered = current.filter((key) => ready.includes(key));
+        return filtered.length ? filtered : ready;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load application data.");
     }
@@ -178,6 +257,10 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (page === "sources") void refreshSamStatus();
+  }, [page]);
 
   useEffect(() => {
     const timer = window.setTimeout(async () => {
@@ -212,7 +295,7 @@ export default function App() {
   };
 
   const confirmImport = async () => {
-    if (!uploadFile) return;
+    if (!uploadFile || !preview?.valid_for_import) return;
     setBusy(true);
     setError("");
     try {
@@ -231,6 +314,30 @@ export default function App() {
     }
   };
 
+  const handleSamExtract = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    setSamMessage("");
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const result = await request<{ item: { filename: string; extract_date: string | null; record_count: number } }>(
+        "/api/sources/sam/extract",
+        { method: "POST", body },
+      );
+      setSamMessage(`Loaded ${result.item.filename} · ${result.item.record_count} firm exclusion records`);
+      await refreshSamStatus();
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load SAM exclusions extract.");
+    } finally {
+      setBusy(false);
+      event.target.value = "";
+    }
+  };
+
   const createRun = async () => {
     if (!selectedSources.length) return;
     setBusy(true);
@@ -246,7 +353,45 @@ export default function App() {
       });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to create research run.");
+      setError(err instanceof Error ? err.message : "Unable to run research.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviewChange = async (id: number, decision: "approved" | "dismissed") => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/review/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, actor: "local-user" }),
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to review proposed change.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveIdentity = async (
+    snapshotId: number,
+    sourceRecordId: string,
+    judgment: "SAME_ENTITY" | "DIFFERENT_ENTITY",
+  ) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/identity-review/${snapshotId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_record_id: sourceRecordId, judgment, actor: "local-user" }),
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save identity decision.");
     } finally {
       setBusy(false);
     }
@@ -261,8 +406,9 @@ export default function App() {
     setSelectedBidderIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   };
 
-  const selectSourceOnly = (key: string) => {
-    setSelectedSources([key]);
+  const selectSourceOnly = (source: Source) => {
+    if (source.status !== "ready") return;
+    setSelectedSources([source.key]);
     setPage("research");
   };
 
@@ -275,10 +421,7 @@ export default function App() {
     ["activity", "Activity", Activity],
   ] as const;
 
-  const selectedSourceNames = useMemo(
-    () => sources.filter((source) => selectedSources.includes(source.key)).map((source) => source.name),
-    [sources, selectedSources]
-  );
+  const readySources = useMemo(() => sources.filter((source) => source.status === "ready"), [sources]);
 
   return (
     <div className="app-shell">
@@ -320,8 +463,8 @@ export default function App() {
             <>
               <div className="metric-grid">
                 <Metric label="Approved bidders" value={dashboard?.bidder_count ?? 0} hint={dashboard?.active_import?.filename || "No master CSV imported"} />
-                <Metric label="Research sources" value={dashboard?.source_count ?? 14} hint={`${dashboard?.implemented_source_count ?? 0} collectors implemented`} />
-                <Metric label="Pending review" value={dashboard?.pending_review_count ?? 0} hint="Human approval required" />
+                <Metric label="Ready sources" value={dashboard?.implemented_source_count ?? 0} hint={`${dashboard?.source_count ?? 14} sources defined`} />
+                <Metric label="Pending review" value={dashboard?.pending_review_count ?? 0} hint={`${dashboard?.pending_identity_count ?? 0} identity · ${dashboard?.pending_change_count ?? 0} data changes`} />
                 <Metric label="Bidder schema" value={EXPECTED_BIDDER_FIELDS.length} hint="Example database fields supported" />
               </div>
               <div className="dashboard-grid">
@@ -342,9 +485,9 @@ export default function App() {
                 <Card>
                   <div className="card-heading"><div><span className="section-kicker">Workflow</span><h2>Research → Compare → Review</h2></div><ListChecks size={22} /></div>
                   <div className="workflow-list">
-                    <WorkflowStep number="1" title="Research" text="Run selected sources against approved bidders only." />
-                    <WorkflowStep number="2" title="Compare" text="Keep findings separate and compare them to current approved values." />
-                    <WorkflowStep number="3" title="Review" text="Approve or dismiss proposed changes with evidence visible." />
+                    <WorkflowStep number="1" title="Research" text="Run implemented sources against approved bidders only." />
+                    <WorkflowStep number="2" title="Verify identity" text="Ambiguous company matches stop for human judgment instead of guessing." />
+                    <WorkflowStep number="3" title="Approve changes" text="Only reviewed findings can update the approved master." />
                   </div>
                   <button className="btn primary full" onClick={() => setPage("research")}><Play size={16} /> Configure Research Run</button>
                 </Card>
@@ -361,7 +504,7 @@ export default function App() {
           {page === "database" && (
             <Card className="table-card">
               <div className="card-heading database-heading">
-                <div><span className="section-kicker">Approved master</span><h2>Bidder Database</h2><p>{bidderTotal} records · All {EXPECTED_BIDDER_FIELDS.length} example fields are preserved; this grid shows a working summary.</p></div>
+                <div><span className="section-kicker">Approved master</span><h2>Bidder Database</h2><p>{bidderTotal} records · All {EXPECTED_BIDDER_FIELDS.length} expected fields are preserved; this grid shows a working summary.</p></div>
                 <div className="button-row">
                   <button className="btn secondary" onClick={() => fileInput.current?.click()}><Upload size={16} /> Import CSV</button>
                   {dashboard?.active_import && <a className="btn ghost" href={`${API}/api/export`}><Download size={16} /> Export CSV</a>}
@@ -404,46 +547,127 @@ export default function App() {
                 <label className={`choice-card ${researchScope === "selected" ? "selected" : ""}`}><input type="radio" checked={researchScope === "selected"} onChange={() => setResearchScope("selected")} /><div><strong>Selected bidders</strong><span>{selectedBidderIds.length ? `${selectedBidderIds.length} bidders selected in Bidder Database.` : "Select bidders from the database table first."}</span></div></label>
               </Card>
               <Card>
-                <div className="card-heading"><div><span className="section-kicker">Step 2</span><h2>Choose sources</h2></div><ServerCog size={21} /></div>
+                <div className="card-heading"><div><span className="section-kicker">Step 2</span><h2>Choose sources</h2><p>Only sources marked Ready can run.</p></div><ServerCog size={21} /></div>
                 <div className="source-checklist">
-                  {sources.map((source) => (
-                    <label key={source.key} className="source-check-row">
-                      <input type="checkbox" checked={selectedSources.includes(source.key)} onChange={() => setSelectedSources((current) => current.includes(source.key) ? current.filter((key) => key !== source.key) : [...current, source.key])} />
-                      <div><strong>{source.name}</strong><span>{source.category}</span></div><StatusPill status={source.status} />
-                    </label>
-                  ))}
+                  {sources.map((source) => {
+                    const ready = source.status === "ready";
+                    return (
+                      <label key={source.key} className="source-check-row" style={{ opacity: ready ? 1 : 0.55 }}>
+                        <input
+                          type="checkbox"
+                          disabled={!ready}
+                          checked={ready && selectedSources.includes(source.key)}
+                          onChange={() => setSelectedSources((current) => current.includes(source.key) ? current.filter((key) => key !== source.key) : [...current, source.key])}
+                        />
+                        <div><strong>{source.name}</strong><span>{source.category}</span></div><StatusPill status={source.status} />
+                      </label>
+                    );
+                  })}
                 </div>
-                <div className="selection-actions"><button className="text-button" onClick={() => setSelectedSources(sources.map((s) => s.key))}>Select all</button><button className="text-button" onClick={() => setSelectedSources([])}>Clear</button></div>
+                <div className="selection-actions"><button className="text-button" onClick={() => setSelectedSources(readySources.map((source) => source.key))}>Select all ready</button><button className="text-button" onClick={() => setSelectedSources([])}>Clear</button></div>
               </Card>
               <Card className="run-card">
-                <div><span className="section-kicker">Step 3</span><h2>Create research run</h2><p>{researchScope === "all" ? `${dashboard?.bidder_count ?? 0} bidders` : `${selectedBidderIds.length} selected bidders`} × {selectedSources.length} sources</p><p className="muted">Collectors are intentionally not implemented yet. This creates the persisted workflow object and diagnostic trail only.</p></div>
-                <button className="btn primary large" disabled={busy || !selectedSources.length || (researchScope === "selected" && !selectedBidderIds.length)} onClick={() => void createRun()}><Play size={17} /> Create Run</button>
+                <div>
+                  <span className="section-kicker">Step 3</span>
+                  <h2>Run research</h2>
+                  <p>{researchScope === "all" ? `${dashboard?.bidder_count ?? 0} bidders` : `${selectedBidderIds.length} selected bidders`} × {selectedSources.length} ready source{selectedSources.length === 1 ? "" : "s"}</p>
+                  <p className="muted">Ready source adapters execute immediately. Evidence is stored separately; ambiguous identities and changed values are sent to Review.</p>
+                </div>
+                <button className="btn primary large" disabled={busy || !selectedSources.length || (researchScope === "selected" && !selectedBidderIds.length)} onClick={() => void createRun()}><Play size={17} /> Run Research</button>
               </Card>
               <Card className="run-history">
                 <div className="card-heading"><div><span className="section-kicker">History</span><h2>Research Runs</h2></div></div>
-                {!runs.length ? <Empty compact title="No research runs yet" text="Configured runs will appear here with their status and source scope." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span></div>)}
+                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span></div>)}
               </Card>
             </div>
           )}
 
           {page === "review" && (
-            <Card>
-              <div className="card-heading"><div><span className="section-kicker">Human approval</span><h2>Comparison Review Queue</h2><p>Research findings never overwrite the approved master automatically.</p></div><ClipboardCheck size={22} /></div>
-              {!reviewItems.length ? <Empty title="No changes waiting for review" text="Once source collectors are added, new or different findings will appear here with the current value, proposed value, source evidence, and approve/dismiss controls." /> : (
-                <div className="table-wrap"><table><thead><tr><th>Bidder</th><th>Field</th><th>Current</th><th>Proposed</th><th>Source</th><th>Status</th></tr></thead><tbody>{reviewItems.map((item) => <tr key={item.id}><td>{item.contractor_name}</td><td>{prettyField(item.field_name)}</td><td>{item.current_value || "—"}</td><td>{item.proposed_value || "—"}</td><td>{item.source_key}</td><td><StatusPill status={item.status} /></td></tr>)}</tbody></table></div>
-              )}
-            </Card>
+            <div className="research-layout">
+              <Card>
+                <div className="card-heading"><div><span className="section-kicker">Identity review</span><h2>Confirm Company Matches</h2><p>Ambiguous source records stop here until a paralegal decides whether they are the same contractor.</p></div><ShieldCheck size={22} /></div>
+                {!identityReviewItems.length ? <Empty compact title="No identity matches waiting" text="Possible company matches that cannot be safely confirmed automatically will appear here." /> : (
+                  <div className="workflow-list">
+                    {identityReviewItems.map((item) => (
+                      <div key={item.snapshot_id} className="choice-card selected" style={{ alignItems: "flex-start" }}>
+                        <div style={{ width: "100%" }}>
+                          <div className="card-heading">
+                            <div><strong>{item.contractor_name}</strong><span>Source: {item.source_key.toUpperCase()} · Run #{item.research_run_id} · {formatDate(item.retrieved_at)}</span></div>
+                            <StatusPill status={item.result_status} />
+                          </div>
+                          {item.warnings?.map((warning) => <div className="warning-box" key={warning}><AlertTriangle size={16} /><span>{warning}</span></div>)}
+                          <div className="detail-grid">
+                            {item.candidates.map((candidate) => {
+                              const record = candidate.record || {};
+                              const location = [record.address_1, record.city, record.state, record.zip_code].filter(Boolean).join(", ");
+                              return (
+                                <div className="detail-field" key={candidate.source_record_id} style={{ alignItems: "flex-start" }}>
+                                  <span>SAM record {candidate.source_record_id}</span>
+                                  <strong>{record.name || candidate.matched_record_name || "Unnamed SAM record"}</strong>
+                                  <small>{location || "No source address"}</small>
+                                  <small>{record.exclusion_type || "Exclusion type not supplied"}{record.excluding_agency ? ` · ${record.excluding_agency}` : ""}</small>
+                                  <small>Match confidence {formatPercent(candidate.score)} · name {formatPercent(candidate.name_score)} · address {formatPercent(candidate.address_score)}</small>
+                                  <div className="button-row" style={{ marginTop: 8 }}>
+                                    <button className="btn secondary small" disabled={busy} onClick={() => void resolveIdentity(item.snapshot_id, candidate.source_record_id, "SAME_ENTITY")}><CheckCircle2 size={14} /> Same Company</button>
+                                    <button className="btn ghost small" disabled={busy} onClick={() => void resolveIdentity(item.snapshot_id, candidate.source_record_id, "DIFFERENT_ENTITY")}><XCircle size={14} /> Different Company</button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <div className="card-heading"><div><span className="section-kicker">Data review</span><h2>Proposed Master Changes</h2><p>Confirmed evidence still requires approval before the approved bidder database changes.</p></div><ClipboardCheck size={22} /></div>
+                {!reviewItems.filter((item) => item.status === "pending").length ? <Empty compact title="No data changes waiting" text="Confirmed source findings that differ from the master will appear here." /> : (
+                  <div className="table-wrap">
+                    <table>
+                      <thead><tr><th>Bidder</th><th>Field</th><th>Current</th><th>Proposed</th><th>Source</th><th>Evidence</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {reviewItems.filter((item) => item.status === "pending").map((item) => (
+                          <tr key={item.id}>
+                            <td>{item.contractor_name}</td>
+                            <td>{prettyField(item.field_name)}</td>
+                            <td>{item.current_value || "—"}</td>
+                            <td><DataValue value={item.proposed_value} /></td>
+                            <td>{item.source_key.toUpperCase()}</td>
+                            <td>{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer" className="text-button">Source <ExternalLink size={13} /></a> : "Stored snapshot"}</td>
+                            <td><div className="button-row"><button className="btn secondary small" disabled={busy} onClick={() => void reviewChange(item.id, "approved")}><CheckCircle2 size={14} /> Approve</button><button className="btn ghost small" disabled={busy} onClick={() => void reviewChange(item.id, "dismissed")}><X size={14} /> Dismiss</button></div></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            </div>
           )}
 
           {page === "sources" && (
             <div className="sources-grid">
-              {sources.map((source) => (
-                <Card key={source.key} className="source-card">
-                  <div className="source-card-top"><div className="source-icon"><ServerCog size={19} /></div><StatusPill status={source.status} /></div>
-                  <h3>{source.name}</h3><p>{source.category}</p><a href={source.url} target="_blank" rel="noreferrer" className="source-url">{source.url}</a>
-                  <div className="source-card-footer"><span>Collector not started</span><button className="btn ghost small" onClick={() => selectSourceOnly(source.key)}>Configure run</button></div>
-                </Card>
-              ))}
+              {sources.map((source) => {
+                const ready = source.status === "ready";
+                return (
+                  <Card key={source.key} className="source-card">
+                    <div className="source-card-top"><div className="source-icon"><ServerCog size={19} /></div><StatusPill status={source.status} /></div>
+                    <h3>{source.name}</h3><p>{source.category}</p><a href={source.url} target="_blank" rel="noreferrer" className="source-url">{source.url}</a>
+                    {source.key === "sam" && (
+                      <div className="workflow-list" style={{ marginTop: 14 }}>
+                        <div className="workflow-step"><div><ShieldCheck size={14} /></div><section><strong>Public Exclusions V2</strong><span>{samStatus?.cached_extract ? `Cached: ${samStatus.cached_extract}${samStatus.cached_extract_date ? ` · ${samStatus.cached_extract_date}` : ""}` : "No local extract cached yet"}</span></section></div>
+                        <div className="workflow-step"><div>{samStatus?.api_key_configured ? "✓" : "—"}</div><section><strong>Automatic SAM download</strong><span>{samStatus?.api_key_configured ? "SAM_API_KEY is configured; the adapter can refresh the official extract automatically." : "No API key configured. You can upload the official SAM ZIP/CSV extract instead."}</span></section></div>
+                        {samMessage && <div className="warning-box"><CheckCircle2 size={16} /><span>{samMessage}</span></div>}
+                        <button className="btn secondary" disabled={busy} onClick={() => samInput.current?.click()}><Upload size={16} /> Upload Official SAM Extract</button>
+                      </div>
+                    )}
+                    <div className="source-card-footer"><span>{ready ? "Collector ready" : "Collector not started"}</span><button className="btn ghost small" disabled={!ready} onClick={() => selectSourceOnly(source)}>Configure run</button></div>
+                  </Card>
+                );
+              })}
             </div>
           )}
 
@@ -457,17 +681,19 @@ export default function App() {
       </main>
 
       <input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(event) => void handleFile(event)} />
+      <input ref={samInput} type="file" accept=".zip,.csv,application/zip,text/csv" hidden onChange={(event) => void handleSamExtract(event)} />
 
       {preview && (
         <div className="modal-backdrop">
           <div className="modal import-modal">
             <div className="modal-header"><div><span className="section-kicker">Import preview</span><h2>{preview.filename}</h2></div><button className="icon-button" onClick={() => setPreview(null)}><X size={20} /></button></div>
             <div className="preview-metrics"><div><strong>{preview.row_count}</strong><span>Bidder rows</span></div><div><strong>{preview.columns.length}</strong><span>Columns detected</span></div><div><strong>{preview.missing_expected_columns.length}</strong><span>Expected fields missing</span></div><div><strong>{preview.extra_columns.length}</strong><span>Additional fields</span></div></div>
-            {preview.missing_expected_columns.length > 0 && <div className="warning-box"><AlertTriangle size={17} /><div><strong>Some example-schema fields are not present.</strong><span>{preview.missing_expected_columns.join(", ")}</span></div></div>}
+            {preview.validation_errors.length > 0 && <div className="warning-box"><AlertTriangle size={17} /><div><strong>Import validation failed.</strong><span>{preview.validation_errors.join(" · ")}</span></div></div>}
+            {preview.validation_warnings.length > 0 && <div className="warning-box"><AlertTriangle size={17} /><div><strong>Review these warnings.</strong><span>{preview.validation_warnings.join(" · ")}</span></div></div>}
             <p className="modal-note"><strong>Detected schema:</strong> {preview.columns.map(prettyField).join(" · ")}</p>
             <div className="preview-table table-wrap"><table><thead><tr>{preview.columns.map((column) => <th key={column}>{prettyField(column)}</th>)}</tr></thead><tbody>{preview.preview.map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column}>{row[column] || "—"}</td>)}</tr>)}</tbody></table></div>
-            <p className="modal-note">Importing creates a snapshot of the original CSV, replaces the active working master, preserves every source column for export, and clears stale review proposals.</p>
-            <div className="modal-actions"><button className="btn ghost" onClick={() => setPreview(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={() => void confirmImport()}><CheckCircle2 size={16} /> Confirm Import</button></div>
+            <p className="modal-note">Importing creates a snapshot of the original CSV, replaces the active working master, preserves every source column for export, and supersedes stale pending proposals.</p>
+            <div className="modal-actions"><button className="btn ghost" onClick={() => setPreview(null)}>Cancel</button><button className="btn primary" disabled={busy || !preview.valid_for_import} onClick={() => void confirmImport()}><CheckCircle2 size={16} /> Confirm Import</button></div>
           </div>
         </div>
       )}
@@ -522,7 +748,7 @@ function SourceMini({ source }: { source: Source }) {
 }
 
 function StatusPill({ status }: { status: string }) {
-  return <span className={`status-pill status-${status}`}>{statusLabel(status)}</span>;
+  return <span className={`status-pill status-${status.toLowerCase()}`}>{statusLabel(status)}</span>;
 }
 
 function DataValue({ value }: { value: unknown }) {
