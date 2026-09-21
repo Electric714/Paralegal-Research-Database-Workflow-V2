@@ -10,7 +10,7 @@ SOURCES = [
     {"key": "bbb", "name": "Better Business Bureau", "url": "https://www.bbb.org/", "category": "Business complaints", "status": "ready"},
     {"key": "violation_tracker", "name": "Violation Tracker", "url": "https://violationtracker.goodjobsfirst.org/", "category": "Enforcement / violations", "status": "not_implemented"},
     {"key": "wisdot", "name": "Wisconsin DOT Contractor Information", "url": "http://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx", "category": "Contractor eligibility / debarment", "status": "not_implemented"},
-    {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://enforcedata.dol.gov/views/data_catalogs.php", "category": "Labor enforcement", "status": "not_implemented"},
+    {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://data.dol.gov/", "category": "Labor enforcement", "status": "not_implemented"},
     {"key": "gsa_state_debarment", "name": "GSA OIG State Suspension & Debarment Directory", "url": "https://www.gsaig.gov/content/suspension-and-debarment-sites-state", "category": "State debarment directory", "status": "not_implemented"},
     {"key": "mn_debarment", "name": "Minnesota Debarred Vendors", "url": "http://www.mmd.admin.state.mn.us/debarredreport.asp", "category": "State debarment", "status": "not_implemented"},
     {"key": "responsible_mn", "name": "Responsible Minnesota", "url": "http://responsiblemn.org/", "category": "Contractor responsibility", "status": "not_implemented"},
