@@ -30,6 +30,7 @@ _VALUE_ATTR_RE = re.compile(
     r"\svalue\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
     re.IGNORECASE | re.DOTALL,
 )
+_URL_IN_TEXT_RE = re.compile(r"https://[^\s\"'<>]+", re.IGNORECASE)
 DEFAULT_OUTPUT_ROOT = (
     Path(__file__).resolve().parents[3] / "data" / "source_cache" / "wcrb" / "probe"
 )
@@ -135,6 +136,10 @@ def _safe_request_url(url: str) -> str:
     except ValueError:
         return "[malformed-url]"
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def _safe_error_text(value: str) -> str:
+    return _URL_IN_TEXT_RE.sub(lambda match: _safe_request_url(match.group(0)), value)
 
 
 def _redact_hidden_input_values(html: str) -> str:
@@ -371,8 +376,11 @@ def _write_artifact_manifest(output_dir: Path, paths: list[Path]) -> Path:
 
 
 def _normalize_playwright_error(exc: Exception) -> WcrbProbeError:
+    if isinstance(exc, WcrbProbeError):
+        return exc
+
     name = type(exc).__name__
-    text = str(exc)
+    text = _safe_error_text(str(exc))
     lowered = text.casefold()
     if "executable doesn't exist" in lowered or "browser executable" in lowered:
         return WcrbEnvironmentError(
@@ -383,9 +391,45 @@ def _normalize_playwright_error(exc: Exception) -> WcrbProbeError:
         return WcrbTimeoutError(f"WCRB browser operation timed out: {text}")
     if type(exc).__module__.startswith("playwright"):
         return WcrbProbeError(f"WCRB browser operation failed: {text}")
-    if isinstance(exc, WcrbProbeError):
-        return exc
     return WcrbProbeError(f"Unexpected WCRB probe failure ({name}): {text}")
+
+
+def _persist_failure(
+    *,
+    output_dir: Path,
+    contractor_name: str,
+    stage: str,
+    error: WcrbProbeError,
+    request_log: list[dict[str, Any]],
+    blocked_requests: list[dict[str, Any]],
+    page,
+) -> None:
+    failure_paths = _safe_page_snapshot(page, output_dir, stem="failure") if page is not None else {}
+    try:
+        _write_request_log(output_dir, request_log, blocked_requests)
+    except Exception:
+        pass
+    try:
+        _write_json(
+            output_dir / "diagnostics.json",
+            {
+                "status": "failed",
+                "stage": stage,
+                "searched_name": contractor_name,
+                "final_url": _safe_request_url(page.url) if page is not None else None,
+                "error_type": type(error).__name__,
+                "error": _safe_error_text(str(error)),
+                "blocked_request_count": len(blocked_requests),
+                "failure_artifacts": failure_paths,
+            },
+        )
+    except Exception:
+        pass
+    try:
+        _write_artifact_manifest(output_dir, list(output_dir.iterdir()))
+    except Exception:
+        pass
+    setattr(error, "output_dir", str(output_dir))
 
 
 def run_wcrb_probe(
@@ -424,155 +468,155 @@ def run_wcrb_probe(
     context = None
     page = None
     stage = "initializing"
+    failure_persisted = False
 
     try:
         with sync_playwright() as playwright:
-            stage = "launching_chromium"
-            browser = playwright.chromium.launch(headless=not headed)
-            context = browser.new_context(
-                service_workers="block",
-                viewport={"width": 1440, "height": 1100},
-                accept_downloads=False,
-            )
-
-            def route_request(route) -> None:
-                request = route.request
-                decision = browser_request_decision(
-                    request.method,
-                    request.url,
-                    resource_type=request.resource_type,
-                )
-                entry = {
-                    "method": request.method,
-                    "url": _safe_request_url(request.url),
-                    "resource_type": request.resource_type,
-                    "allowed": decision.allowed,
-                    "reason": decision.reason,
-                }
-                request_log.append(entry)
-                if decision.allowed:
-                    route.continue_()
-                else:
-                    blocked_requests.append(entry)
-                    route.abort()
-
-            context.route("**/*", route_request)
-            page = context.new_page()
-
-            stage = "opening_search_form"
-            _open_search_form(page)
-
-            search_form_html_path = output_dir / "search-form.html"
-            _write_sanitized_html(search_form_html_path, page.content())
-            search_form_screenshot = output_dir / "search-form.png"
-            page.screenshot(path=str(search_form_screenshot), full_page=True, timeout=10_000)
-
-            manifest_path = output_dir / "controls.json"
-            _write_json(manifest_path, _control_manifest(page))
-
-            stage = "submitting_employer_search"
-            employer_input = _find_employer_name_input(page)
-            employer_input.fill(contractor_name, timeout=10_000)
-            _find_employer_search_button(page).click(timeout=15_000)
-            _settle(page, timeout_ms=12_000)
-            _raise_if_blocked(page)
-
-            final_parts = urlsplit(page.url)
-            final_host = (final_parts.hostname or "").lower().rstrip(".")
-            if final_parts.scheme != "https" or final_host not in WCRB_HOSTS:
-                raise WcrbProbeError(
-                    f"WCRB search navigated outside the expected HTTPS host: {_safe_request_url(page.url)}"
+            try:
+                stage = "launching_chromium"
+                browser = playwright.chromium.launch(headless=not headed)
+                context = browser.new_context(
+                    service_workers="block",
+                    viewport={"width": 1440, "height": 1100},
+                    accept_downloads=False,
                 )
 
-            stage = "capturing_result"
-            result_html_path = output_dir / "result.html"
-            _write_sanitized_html(result_html_path, page.content())
-            result_screenshot = output_dir / "result.png"
-            page.screenshot(path=str(result_screenshot), full_page=True, timeout=10_000)
+                def route_request(route) -> None:
+                    request = route.request
+                    decision = browser_request_decision(
+                        request.method,
+                        request.url,
+                        resource_type=request.resource_type,
+                    )
+                    entry = {
+                        "method": request.method,
+                        "url": _safe_request_url(request.url),
+                        "resource_type": request.resource_type,
+                        "allowed": decision.allowed,
+                        "reason": decision.reason,
+                    }
+                    request_log.append(entry)
+                    if decision.allowed:
+                        route.continue_()
+                    else:
+                        blocked_requests.append(entry)
+                        route.abort()
 
-            request_log_path = _write_request_log(output_dir, request_log, blocked_requests)
-            diagnostics_path = output_dir / "diagnostics.json"
-            _write_json(
-                diagnostics_path,
-                {
-                    "status": "success",
-                    "stage": stage,
-                    "searched_name": contractor_name,
-                    "final_url": _safe_request_url(page.url),
-                    "blocked_request_count": len(blocked_requests),
-                },
-            )
-            artifact_manifest_path = _write_artifact_manifest(
-                output_dir,
-                [
-                    search_form_html_path,
-                    search_form_screenshot,
-                    manifest_path,
-                    result_html_path,
-                    result_screenshot,
-                    request_log_path,
+                context.route("**/*", route_request)
+                page = context.new_page()
+
+                stage = "opening_search_form"
+                _open_search_form(page)
+
+                search_form_html_path = output_dir / "search-form.html"
+                _write_sanitized_html(search_form_html_path, page.content())
+                search_form_screenshot = output_dir / "search-form.png"
+                page.screenshot(path=str(search_form_screenshot), full_page=True, timeout=10_000)
+
+                manifest_path = output_dir / "controls.json"
+                _write_json(manifest_path, _control_manifest(page))
+
+                stage = "submitting_employer_search"
+                employer_input = _find_employer_name_input(page)
+                employer_input.fill(contractor_name, timeout=10_000)
+                _find_employer_search_button(page).click(timeout=15_000)
+                _settle(page, timeout_ms=12_000)
+                _raise_if_blocked(page)
+
+                final_parts = urlsplit(page.url)
+                final_host = (final_parts.hostname or "").lower().rstrip(".")
+                if final_parts.scheme != "https" or final_host not in WCRB_HOSTS:
+                    raise WcrbProbeError(
+                        f"WCRB search navigated outside the expected HTTPS host: {_safe_request_url(page.url)}"
+                    )
+
+                stage = "capturing_result"
+                result_html_path = output_dir / "result.html"
+                _write_sanitized_html(result_html_path, page.content())
+                result_screenshot = output_dir / "result.png"
+                page.screenshot(path=str(result_screenshot), full_page=True, timeout=10_000)
+
+                request_log_path = _write_request_log(output_dir, request_log, blocked_requests)
+                diagnostics_path = output_dir / "diagnostics.json"
+                _write_json(
                     diagnostics_path,
-                ],
-            )
+                    {
+                        "status": "success",
+                        "stage": stage,
+                        "searched_name": contractor_name,
+                        "final_url": _safe_request_url(page.url),
+                        "blocked_request_count": len(blocked_requests),
+                    },
+                )
+                artifact_manifest_path = _write_artifact_manifest(
+                    output_dir,
+                    [
+                        search_form_html_path,
+                        search_form_screenshot,
+                        manifest_path,
+                        result_html_path,
+                        result_screenshot,
+                        request_log_path,
+                        diagnostics_path,
+                    ],
+                )
 
-            capture = ProbeCapture(
-                output_dir=str(output_dir),
-                searched_name=contractor_name,
-                final_url=_safe_request_url(page.url),
-                search_form_html=str(search_form_html_path),
-                result_html=str(result_html_path),
-                search_form_screenshot=str(search_form_screenshot),
-                result_screenshot=str(result_screenshot),
-                control_manifest=str(manifest_path),
-                request_log=str(request_log_path),
-                artifact_manifest=str(artifact_manifest_path),
-                diagnostics=str(diagnostics_path),
-            )
-            _write_json(output_dir / "capture.json", asdict(capture))
-            return capture
+                capture = ProbeCapture(
+                    output_dir=str(output_dir),
+                    searched_name=contractor_name,
+                    final_url=_safe_request_url(page.url),
+                    search_form_html=str(search_form_html_path),
+                    result_html=str(result_html_path),
+                    search_form_screenshot=str(search_form_screenshot),
+                    result_screenshot=str(result_screenshot),
+                    control_manifest=str(manifest_path),
+                    request_log=str(request_log_path),
+                    artifact_manifest=str(artifact_manifest_path),
+                    diagnostics=str(diagnostics_path),
+                )
+                _write_json(output_dir / "capture.json", asdict(capture))
+                return capture
+            except Exception as exc:
+                normalized = _normalize_playwright_error(exc)
+                _persist_failure(
+                    output_dir=output_dir,
+                    contractor_name=contractor_name,
+                    stage=stage,
+                    error=normalized,
+                    request_log=request_log,
+                    blocked_requests=blocked_requests,
+                    page=page,
+                )
+                failure_persisted = True
+                if normalized is exc:
+                    raise
+                raise normalized from exc
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as exc:
         normalized = _normalize_playwright_error(exc)
-        failure_paths: dict[str, str] = {}
-        if page is not None:
-            failure_paths = _safe_page_snapshot(page, output_dir, stem="failure")
-        try:
-            _write_request_log(output_dir, request_log, blocked_requests)
-        except Exception:
-            pass
-        try:
-            _write_json(
-                output_dir / "diagnostics.json",
-                {
-                    "status": "failed",
-                    "stage": stage,
-                    "searched_name": contractor_name,
-                    "final_url": _safe_request_url(page.url) if page is not None else None,
-                    "error_type": type(normalized).__name__,
-                    "error": str(normalized),
-                    "blocked_request_count": len(blocked_requests),
-                    "failure_artifacts": failure_paths,
-                },
+        if not failure_persisted:
+            _persist_failure(
+                output_dir=output_dir,
+                contractor_name=contractor_name,
+                stage=stage,
+                error=normalized,
+                request_log=request_log,
+                blocked_requests=blocked_requests,
+                page=None,
             )
-        except Exception:
-            pass
-        try:
-            _write_artifact_manifest(output_dir, list(output_dir.iterdir()))
-        except Exception:
-            pass
         if normalized is exc:
             raise
         raise normalized from exc
-    finally:
-        if context is not None:
-            try:
-                context.close()
-            except Exception:
-                pass
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
 
 
 def main() -> int:
@@ -591,6 +635,9 @@ def main() -> int:
         capture = run_wcrb_probe(args.name, headed=args.headed)
     except (WcrbProbeError, ValueError) as exc:
         print(f"WCRB probe failed safely: {exc}")
+        output_dir = getattr(exc, "output_dir", None)
+        if output_dir:
+            print(f"Diagnostics saved to: {output_dir}")
         return 2
     except Exception as exc:
         print(f"WCRB probe failed unexpectedly but safely: {type(exc).__name__}: {exc}")
