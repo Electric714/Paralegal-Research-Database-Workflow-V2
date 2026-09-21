@@ -24,12 +24,12 @@ DEFAULT_TIMEOUT_SECONDS = 25.0
 DEFAULT_BOUNDARY_MARGIN = 1
 MAX_ALIASES = 6
 MAX_PROFILE_CANDIDATES = 8
+ALLOWED_BBB_HOSTS = {"bbb.org", "www.bbb.org"}
 
-# BBB's profile sitemaps are geographically clustered rather than split by state.
-# These ranges were live-mapped against the published sitemap index during the
-# earlier proof of concept. One neighboring sitemap is included at each boundary
-# because state transitions can occur inside a sitemap file. Unsupported states
-# fail closed as unknown instead of inventing a negative result.
+# BBB's published business-profile sitemaps are geographically clustered rather
+# than split cleanly by state. These ranges were mapped during the earlier live
+# proof of concept. A neighboring sitemap is included at each range boundary.
+# Unsupported states fail closed instead of producing a negative result.
 BBB_STATE_SITEMAP_RANGES: dict[str, tuple[tuple[int, int], ...]] = {
     "FL": ((185, 185), (188, 191), (269, 290), (321, 324), (358, 367)),
     "IL": ((291, 310), (357, 357)),
@@ -60,7 +60,9 @@ _COMPLAINT_12M_PATTERNS = (
     re.compile(r"\b([\d,]+)\s+complaints?\s+closed\s+in\s+the\s+last\s+12\s+months?\b", re.I),
     re.compile(r"\b([\d,]+)\s+closed\s+complaints?\s+in\s+the\s+last\s+12\s+months?\b", re.I),
 )
-_RATING_RE = re.compile(r"\bBBB\s+Rating\s*:?\s*([A-F](?:\+|-)?)\b", re.I)
+# Do not put a word-boundary after the optional +/-: '+' and '-' are non-word
+# characters, which caused "A+" to be truncated to "A" in the first CI pass.
+_RATING_RE = re.compile(r"\bBBB\s+Rating\s*:?\s*([A-F](?:[+-])?)", re.I)
 _CHALLENGE_RE = re.compile(
     r"(?:captcha|verify\s+(?:that\s+)?you\s+are\s+human|access\s+denied|cloudflare|"
     r"unusual\s+traffic|security\s+check)",
@@ -76,6 +78,8 @@ class BbbRequestError(RuntimeError):
 
 
 class _HtmlDocument(HTMLParser):
+    """Small non-executing HTML reader for visible text, headings, and JSON-LD."""
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.text_parts: list[str] = []
@@ -228,6 +232,7 @@ def _record_id(url: str) -> str:
 
 
 def _slug_name(url: str) -> str:
+    """Discovery hint only. This value is never accepted as live identity evidence."""
     slug = _record_id(url)
     slug = re.sub(r"-\d{4,}(?:-\d+)?$", "", slug)
     return " ".join(part for part in slug.split("-") if part)
@@ -286,6 +291,7 @@ def _parse_location(text: str) -> dict[str, str]:
 
 
 def parse_profile_html(html: str, url: str) -> BbbProfile | None:
+    """Parse identity from the returned BBB page itself, never from its URL slug."""
     parser = _HtmlDocument()
     parser.feed(html)
     text = parser.visible_text
@@ -327,23 +333,18 @@ def parse_profile_html(html: str, url: str) -> BbbProfile | None:
                 best["name"] = heading
                 break
     if not best.get("name"):
-        best["name"] = _slug_name(url)
-
-    if not all(best.get(key) for key in ("city", "state", "zip")):
-        location = _parse_location(text[:10000])
-        for key, value in location.items():
-            if value and not best.get(key):
-                best[key] = value
-
-    profile_url = _profile_base(url)
-    path_match = _PROFILE_PATH.match(urlsplit(profile_url).path)
-    if path_match:
-        best.setdefault("state", path_match.group("state").upper())
-        best.setdefault("city", path_match.group("city").replace("-", " "))
-
-    if not best.get("name"):
         return None
 
+    # Location must also come from the returned document. City/state embedded in
+    # the URL are only discovery hints and cannot corroborate identity.
+    location = _parse_location(text[:10000])
+    for key, value in location.items():
+        if value and not best.get(key):
+            best[key] = value
+    if not any(best.get(key) for key in ("address", "city", "state", "zip")):
+        return None
+
+    profile_url = _profile_base(url)
     lower = text.casefold()
     accredited: bool | None = None
     if "not a bbb accredited business" in lower or "is not bbb accredited" in lower:
@@ -414,8 +415,8 @@ def _cached_profile_url(bidder_id: int) -> str | None:
 class BbbBusinessProfileSource(ResearchSource):
     source_key = "bbb"
     display_name = "Better Business Bureau"
-    adapter_version = "1.0.0"
-    parser_version = "1.0.0"
+    adapter_version = "1.0.1"
+    parser_version = "1.0.1"
 
     def __init__(
         self,
@@ -455,12 +456,23 @@ class BbbBusinessProfileSource(ResearchSource):
         )
 
     def _get(self, client: httpx.Client, url: str) -> httpx.Response:
+        requested_host = (urlsplit(url).hostname or "").casefold()
+        if requested_host not in ALLOWED_BBB_HOSTS:
+            raise BbbRequestError("Refusing to request a non-BBB URL.", status=SourceResultStatus.HTTP_ERROR)
         try:
             response = client.get(url)
         except httpx.TimeoutException as exc:
             raise BbbRequestError("BBB request timed out.", status=SourceResultStatus.TIMEOUT) from exc
         except httpx.HTTPError as exc:
             raise BbbRequestError("BBB request failed.", status=SourceResultStatus.SOURCE_UNAVAILABLE) from exc
+
+        final_host = (response.url.host or "").casefold()
+        if final_host not in ALLOWED_BBB_HOSTS:
+            raise BbbRequestError(
+                "BBB request redirected outside the allowed BBB host boundary.",
+                status=SourceResultStatus.HTTP_ERROR,
+                http_status=response.status_code,
+            )
         if response.status_code in {401, 403}:
             raise BbbRequestError("BBB blocked the request.", status=SourceResultStatus.BLOCKED, http_status=response.status_code)
         if response.status_code == 429:
@@ -470,18 +482,23 @@ class BbbBusinessProfileSource(ResearchSource):
         if response.status_code >= 400:
             raise BbbRequestError(f"BBB returned HTTP {response.status_code}.", status=SourceResultStatus.HTTP_ERROR, http_status=response.status_code)
         if _CHALLENGE_RE.search(response.text):
-            raise BbbRequestError("BBB returned an access challenge instead of the requested document.", status=SourceResultStatus.BLOCKED, http_status=response.status_code)
+            raise BbbRequestError(
+                "BBB returned an access challenge instead of the requested document.",
+                status=SourceResultStatus.BLOCKED,
+                http_status=response.status_code,
+            )
         return response
 
     def _load_index(self, client: httpx.Client) -> dict[int, str]:
         if self._index_by_number is not None:
             return self._index_by_number
         response = self._get(client, BBB_SITEMAP_INDEX)
-        index: dict[int, str] = {}
         try:
             locations = _xml_locs(response.text)
         except ValueError as exc:
             raise BbbRequestError(str(exc), status=SourceResultStatus.LAYOUT_CHANGED, http_status=response.status_code) from exc
+
+        index: dict[int, str] = {}
         for value in locations:
             parts = urlsplit(value)
             if (parts.hostname or "").casefold() != "www.bbb.org" or parts.query:
@@ -490,7 +507,11 @@ class BbbBusinessProfileSource(ResearchSource):
             if match:
                 index[int(match.group("number"))] = value
         if not index:
-            raise BbbRequestError("BBB sitemap index contained no recognized business-profile sitemaps.", status=SourceResultStatus.LAYOUT_CHANGED, http_status=response.status_code)
+            raise BbbRequestError(
+                "BBB sitemap index contained no recognized business-profile sitemaps.",
+                status=SourceResultStatus.LAYOUT_CHANGED,
+                http_status=response.status_code,
+            )
         self._index_by_number = index
         return index
 
@@ -504,9 +525,10 @@ class BbbBusinessProfileSource(ResearchSource):
         state = state.upper()
         if state in self._state_profiles:
             return self._state_profiles[state]
+
         selected = self._selected_numbers(state)
         if not selected:
-            result = ([], False, [f"BBB sitemap mapping is not configured for state {state or 'UNKNOWN'}. "])
+            result = ([], False, [f"BBB sitemap mapping is not configured for state {state or 'UNKNOWN'}."])
             self._state_profiles[state] = result
             return result
 
@@ -531,11 +553,13 @@ class BbbBusinessProfileSource(ResearchSource):
                 complete = False
                 warnings.append(f"BBB sitemap {number} could not be parsed.")
                 continue
+
             for value in locations:
                 parts = urlsplit(value)
                 match = _PROFILE_PATH.match(parts.path) if (parts.hostname or "").casefold() == "www.bbb.org" else None
                 if match and not parts.query and match.group("state").upper() == state:
                     urls.append(_profile_base(value))
+
         result = (list(dict.fromkeys(urls)), complete, warnings)
         self._state_profiles[state] = result
         return result
@@ -619,6 +643,7 @@ class BbbBusinessProfileSource(ResearchSource):
             response = self._get(client, complaints_url)
         except BbbRequestError as exc:
             return self._failure_result(contractor, exc, url=complaints_url)
+
         total, closed_12 = parse_complaint_summary(response.text)
         if total is None:
             return self.validate_result(
@@ -742,8 +767,11 @@ class BbbBusinessProfileSource(ResearchSource):
                                 contractor,
                                 cached_candidate,
                                 client,
-                                discovery_complete=True,
-                                warnings=[],
+                                # A cached profile is a routing shortcut, not proof that
+                                # all current BBB profiles for the bidder were rediscovered.
+                                # Positive complaints are still complete; zero remains partial.
+                                discovery_complete=False,
+                                warnings=["Previously confirmed BBB profile was revalidated directly; sitemap discovery was skipped for this run."],
                                 cached_profile_used=True,
                             )
                 except BbbRequestError as exc:
@@ -758,11 +786,12 @@ class BbbBusinessProfileSource(ResearchSource):
 
             candidate_urls = self._candidate_urls(contractor, profile_urls)
             if not candidate_urls:
+                status = SourceResultStatus.SUCCESS_NO_MATCH if discovery_complete else SourceResultStatus.PARTIAL_RESULTS
                 return self.validate_result(
                     SourceResult(
                         source_key=self.source_key,
                         contractor_id=contractor.internal_id,
-                        status=SourceResultStatus.SUCCESS_NO_MATCH,
+                        status=status,
                         identity_status=IdentityStatus.NOT_EVALUATED,
                         completeness_status=CompletenessStatus.PARTIAL,
                         searched_name=contractor.contractor_name,
@@ -791,10 +820,11 @@ class BbbBusinessProfileSource(ResearchSource):
                     if exc.status == SourceResultStatus.BLOCKED:
                         return self._failure_result(contractor, exc, url=url)
                     continue
+
                 profile = parse_profile_html(response.text, url)
                 if profile is None:
                     fetch_incomplete = True
-                    warnings.append(f"BBB profile identity could not be parsed for {url}.")
+                    warnings.append(f"BBB profile identity could not be parsed from the live page for {url}.")
                     continue
                 candidate = self._score_profile(contractor, profile)
                 if candidate.remembered_judgment != "DIFFERENT_ENTITY" and candidate.score >= 0.72:
@@ -813,7 +843,12 @@ class BbbBusinessProfileSource(ResearchSource):
             confirmed = remembered_same or strong
             if confirmed:
                 best = confirmed[0]
-                competing = [item for item in confirmed[1:] if item.profile.source_record_id != best.profile.source_record_id and item.score >= best.score - 0.03]
+                competing = [
+                    item
+                    for item in confirmed[1:]
+                    if item.profile.source_record_id != best.profile.source_record_id
+                    and item.score >= best.score - 0.03
+                ]
                 if competing and not remembered_same:
                     return self.validate_result(
                         SourceResult(
@@ -859,11 +894,12 @@ class BbbBusinessProfileSource(ResearchSource):
                     )
                 )
 
+            status = SourceResultStatus.SUCCESS_NO_MATCH if discovery_complete and not fetch_incomplete else SourceResultStatus.PARTIAL_RESULTS
             return self.validate_result(
                 SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
-                    status=SourceResultStatus.SUCCESS_NO_MATCH,
+                    status=status,
                     identity_status=IdentityStatus.REJECTED if candidates else IdentityStatus.NOT_EVALUATED,
                     completeness_status=CompletenessStatus.PARTIAL,
                     searched_name=contractor.contractor_name,
