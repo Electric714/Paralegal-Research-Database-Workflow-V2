@@ -133,12 +133,30 @@ def _validate_import(columns: list[str], rows: list[dict[str, str]]) -> Validati
     return report
 
 
-def _compare_uploaded_sam_extract() -> dict | None:
-    """Run SAM against the complete active master immediately after an upload."""
-    bidder_count = db.count_bidders()
+def _parse_bidder_scope(value: str | None) -> list[int] | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        bidder_ids = list(dict.fromkeys(int(part.strip()) for part in value.split(",") if part.strip()))
+    except ValueError as exc:
+        raise HTTPException(422, "bidder_ids must be a comma-separated list of bidder IDs.") from exc
+    if not bidder_ids:
+        return None
+    valid = [
+        bidder_id
+        for bidder_id in bidder_ids
+        if (item := db.get_bidder(bidder_id)) and item.get("_active")
+    ]
+    if len(valid) != len(bidder_ids):
+        raise HTTPException(422, "One or more selected bidders do not exist in the active master database.")
+    return valid
+
+
+def _compare_uploaded_sam_extract(bidder_ids: list[int] | None = None) -> dict | None:
+    bidder_count = len(bidder_ids) if bidder_ids else db.count_bidders()
     if bidder_count == 0:
         return None
-    run = db.create_run(None, ["sam"], bidder_count)
+    run = db.create_run(bidder_ids, ["sam"], bidder_count)
     return execute_research_run(run["id"])
 
 
@@ -192,7 +210,10 @@ def sam_status():
 
 
 @app.post("/api/sources/sam/extract")
-async def upload_sam_extract(file: UploadFile = File(...)):
+async def upload_sam_extract(
+    file: UploadFile = File(...),
+    bidder_ids: str | None = Query(default=None),
+):
     data = await file.read()
     if not data:
         raise HTTPException(422, "The SAM extract is empty.")
@@ -204,6 +225,7 @@ async def upload_sam_extract(file: UploadFile = File(...)):
     except SamExtractError as exc:
         raise HTTPException(422, str(exc)) from exc
 
+    selected_bidder_ids = _parse_bidder_scope(bidder_ids)
     db.add_diagnostic(
         "INFO",
         "SAM exclusions extract loaded",
@@ -216,10 +238,11 @@ async def upload_sam_extract(file: UploadFile = File(...)):
             "record_count": len(dataset.records),
             "sha256": dataset.sha256,
             "acquisition_mode": "manual_upload",
+            "bidder_scope": selected_bidder_ids or "all",
         },
     )
 
-    comparison = _compare_uploaded_sam_extract()
+    comparison = _compare_uploaded_sam_extract(selected_bidder_ids)
     if comparison:
         db.add_diagnostic(
             "INFO",
