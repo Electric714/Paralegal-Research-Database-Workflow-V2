@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import database as db
-from .research.models import SourceResultStatus
+from .research.models import SourceResult, SourceResultStatus
 from .research.service import list_tasks, persist_source_result
 from .research.sources.base import ContractorContext
 from .research.sources.wcca import PUBLIC_WCCA_URL, build_operator_result, build_search_plan
@@ -21,6 +21,8 @@ class WccaCaseInput(BaseModel):
     matched_party_name: str = ""
     case_type: str = ""
     case_status: str = ""
+    filing_date: str = ""
+    disposition: str = ""
     case_url: str = ""
     note: str = ""
 
@@ -54,6 +56,18 @@ def _context(bidder_id: int) -> ContractorContext:
         additional_address_zip=str(bidder.get("additional_address_zip", "")),
         dfi=str(bidder.get("dfi", "")),
     )
+
+
+def _plan_for_bidder(bidder_id: int) -> dict[str, Any]:
+    bidder = db.get_bidder(bidder_id)
+    if not bidder or not bidder.get("_active"):
+        raise HTTPException(404, "Active bidder not found.")
+    plan = build_search_plan(_context(bidder_id))
+    plan["master_values"] = {
+        "circuit_court": str(bidder.get("circuit_court", "")),
+        "ccap_show150": str(bidder.get("ccap_show150", "")),
+    }
+    return plan
 
 
 def _parse_scope(value: str | None) -> list[int]:
@@ -123,6 +137,60 @@ def _refresh_run(run_id: int) -> None:
         )
 
 
+def _comparison(result: SourceResult, bidder: dict[str, Any], *, proposal_created: bool) -> dict[str, Any]:
+    observed = next(
+        (item.observed_value for item in result.evidence if item.field_name == "circuit_court"),
+        None,
+    )
+    current = str(bidder.get("circuit_court", "")).strip()
+    current_ccap = str(bidder.get("ccap_show150", "")).strip()
+
+    if observed == "Y":
+        different = current != "Y"
+        comparison_status = "confirmed_positive_differs" if different else "confirmed_positive_agrees"
+        reason = (
+            "A confirmed WCCA case supports positive circuit_court=Y comparison evidence. "
+            "Automatic field writes remain disabled until the firm's legacy field rule is confirmed."
+        )
+    elif result.status == SourceResultStatus.SUCCESS_NO_MATCH:
+        different = False
+        comparison_status = "public_no_match_not_master_negative"
+        reason = (
+            "No currently displayed WCCA match was found, but WCCA is not the complete court record and has access/display limitations. "
+            "This result does not establish circuit_court=N and cannot contradict or erase an existing Y."
+        )
+    elif result.status == SourceResultStatus.BLOCKED:
+        different = False
+        comparison_status = "blocked_no_field_observation"
+        reason = "WCCA could not be completed; no circuit_court comparison is made."
+    elif result.status == SourceResultStatus.AMBIGUOUS_MATCH:
+        different = False
+        comparison_status = "ambiguous_no_field_observation"
+        reason = "A possible WCCA case was recorded but contractor identity was not confirmed; no circuit_court comparison is made."
+    else:
+        different = False
+        comparison_status = "incomplete_no_field_observation"
+        reason = "The WCCA search is incomplete or lacks sufficient case identifiers; no negative circuit_court conclusion is made."
+
+    return {
+        "field_name": "circuit_court",
+        "current_value": current,
+        "observed_value": observed,
+        "different": different,
+        "comparison_status": comparison_status,
+        "proposal_created": proposal_created,
+        "write_enabled": False,
+        "reason": reason,
+        "ccap_show150": {
+            "current_value": current_ccap,
+            "observed_value": None,
+            "write_enabled": False,
+            "status": "undefined_legacy_semantics",
+            "reason": "No authoritative definition of the firm's ccap_show150 field has been established.",
+        },
+    }
+
+
 @router.get("/status")
 def wcca_status():
     return {
@@ -134,7 +202,10 @@ def wcca_status():
             "workbench_url": "/wcca-workbench.html",
             "automatic_public_scraping": False,
             "field_write_enabled": False,
+            "positive_comparison_enabled": True,
+            "negative_field_updates": False,
             "field_write_reason": "Confirm circuit_court and ccap_show150 legacy semantics with the firm first.",
+            "no_match_rule": "A complete public WCCA no-match is source-level evidence only and never becomes circuit_court=N.",
         }
     }
 
@@ -142,7 +213,7 @@ def wcca_status():
 @router.get("/plans")
 def wcca_plans(bidder_ids: str | None = Query(default=None)):
     ids = _parse_scope(bidder_ids)
-    return {"items": [build_search_plan(_context(bidder_id)) for bidder_id in ids]}
+    return {"items": [_plan_for_bidder(bidder_id) for bidder_id in ids]}
 
 
 @router.post("/result")
@@ -167,19 +238,7 @@ def wcca_result(payload: WccaOperatorResultRequest):
     _refresh_run(run_id)
 
     bidder = db.get_bidder(payload.bidder_id) or {}
-    observed = next(
-        (item.observed_value for item in result.evidence if item.field_name == "circuit_court"),
-        None,
-    )
-    comparison = {
-        "field_name": "circuit_court",
-        "current_value": str(bidder.get("circuit_court", "")),
-        "observed_value": observed,
-        "different": observed is not None and str(bidder.get("circuit_court", "")).strip() != str(observed).strip(),
-        "proposal_created": bool(persisted["proposal_ids"]),
-        "write_enabled": False,
-        "reason": "WCCA evidence is comparison-only until the firm's circuit_court and ccap_show150 rules are confirmed.",
-    }
+    comparison = _comparison(result, bidder, proposal_created=bool(persisted["proposal_ids"]))
     db.add_diagnostic(
         "INFO" if result.status in {SourceResultStatus.SUCCESS_NO_MATCH, SourceResultStatus.SUCCESS_WITH_FINDINGS} else "WARNING",
         "WCCA operator result recorded",
