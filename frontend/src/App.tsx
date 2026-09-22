@@ -51,10 +51,6 @@ type RunSummaryTask = {
   task_id: number; source_key: string; status: string; summary_status: keyof RunSummaryCounts;
   identity_status?: string | null; completeness_status?: string | null; identity_confidence?: number | null;
   attempt_count: number; retryable: boolean;
-type RunSummarySource = RunSummaryCounts & { source_key: string; expected: number; change_count: number };
-type RunSummaryTask = {
-  task_id: number; source_key: string; status: string; summary_status: keyof RunSummaryCounts;
-  identity_status?: string | null; completeness_status?: string | null; identity_confidence?: number | null;
   checked_at?: string | null; source_url?: string | null; source_record_id?: string | null; snapshot_id?: number | null;
   changes: ReviewItem[];
 };
@@ -62,7 +58,6 @@ type RunSummaryBidder = { bidder_id: number; external_id?: string | null; contra
 type RunSummary = {
   run: Run; expected_tasks: number; persisted_tasks: number; accounted_tasks: number; safe_complete_tasks: number;
   attention_tasks: number; retryable_task_count: number; counts: RunSummaryCounts; raw_status_counts: Record<string, number>; change_count: number;
-  attention_tasks: number; counts: RunSummaryCounts; raw_status_counts: Record<string, number>; change_count: number;
   pending_change_count: number; integrity_ok: boolean; integrity_issues: string[]; sources: RunSummarySource[]; bidders: RunSummaryBidder[];
 };
 type DashboardData = {
@@ -754,14 +749,18 @@ export default function App() {
               <Card className="run-history">
                 <div className="card-heading"><div><span className="section-kicker">History</span><h2>Research Runs</h2></div></div>
                 {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span><div className="button-row"><button className="btn ghost small" disabled={busy} onClick={() => void loadRunSummary(run.id)}>Summary</button><button className="btn ghost small" disabled={busy} onClick={() => void rerunResearch(run.id)}><Play size={13} /> Run Again</button></div></div>)}
-                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span><button className="btn ghost small" onClick={() => void loadRunSummary(run.id)}>Summary</button></div>)}
               </Card>
 
               {runSummary && summaryRunId && (
                 <Card className="run-summary-card">
                   <div className="card-heading">
                     <div><span className="section-kicker">Research control panel</span><h2>Run #{summaryRunId} Summary</h2><p>{runSummary.expected_tasks} expected bidder × source checks · reconstructed from persisted research state.</p></div>
-                    <div className="button-row"><StatusPill status={runSummary.integrity_ok ? "completed" : "failed"} /><button className="icon-button" onClick={() => { setRunSummary(null); setSummaryRunId(null); }}><X size={16} /></button></div>
+                    <div className="button-row">
+                      <StatusPill status={runSummary.integrity_ok ? "completed" : "failed"} />
+                      <button className="btn secondary small" disabled={busy || runSummary.retryable_task_count === 0} onClick={() => void retryRunProblems(summaryRunId)}><RefreshCw size={13} /> Retry Problems ({runSummary.retryable_task_count})</button>
+                      <button className="btn ghost small" disabled={busy} onClick={() => void rerunResearch(summaryRunId)}><Play size={13} /> Run Again</button>
+                      <button className="icon-button" onClick={() => { setRunSummary(null); setSummaryRunId(null); }}><X size={16} /></button>
+                    </div>
                   </div>
                   {!runSummary.integrity_ok && <div className="warning-box"><AlertTriangle size={16} /><div><strong>Run reconciliation problem</strong><span>{runSummary.integrity_issues.join(" · ")}</span></div></div>}
                   <div className="summary-metrics">

@@ -104,8 +104,6 @@ def _approved_names(contractor: ContractorContext) -> list[tuple[str, str]]:
 
 
 def _party_segments(value: str) -> list[str]:
-    # MPCA rows can name multiple regulated parties. Split only on strong delimiters;
-    # do not split ordinary "&" business names.
     parts = [x.strip() for x in re.split(r"[;\n]+|\s+/\s+", value) if x.strip()]
     return parts or [value.strip()]
 
@@ -132,10 +130,6 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
     adapter_version = "1.0.1"
-class MinnesotaPcaEnforcementSource(ResearchSource):
-    source_key = "mn_pca"
-    display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.0.0"
     parser_version = "1.0.0"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
@@ -207,10 +201,6 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     if _should_review_name_variant(name_norm, segment_norm, score):
                         ambiguous.append((record, name, basis, segment, score / 100.0))
 
-                    if score >= 94:
-                        ambiguous.append((record, name, basis, segment, score / 100.0))
-
-        # Deduplicate records that matched more than one representation.
         exact_by_id = {item[0].record_id: item for item in exact}
         ambiguous_by_id = {item[0].record_id: item for item in ambiguous if item[0].record_id not in exact_by_id}
         exact = list(exact_by_id.values())
