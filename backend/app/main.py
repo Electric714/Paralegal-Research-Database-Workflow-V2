@@ -18,7 +18,10 @@ from .import_validation import ValidationReport, validate_bidder_rows
 from .research.executor import execute_research_run
 from .research.field_mappings import SOURCE_FIELD_MAPPINGS
 from .research.identity_review import list_identity_review_items, resolve_identity_review
+from .research.retry_controls import rerun_research_run, retry_run_problems, retry_task
+from .research.run_summary import get_run_summary
 from .research.service import list_tasks, record_identity_judgment, review_change
+from .research.run_summary import get_run_summary
 from .research.sources.sam_exclusions import (
     MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
     SamExtractError,
@@ -57,6 +60,10 @@ def startup() -> None:
 class RunRequest(BaseModel):
     source_keys: list[str]
     bidder_ids: list[int] | None = None
+
+
+class RetryRequest(BaseModel):
+    actor: str | None = None
 
 
 class IdentityJudgmentRequest(BaseModel):
@@ -403,9 +410,41 @@ def execute_run(run_id: int):
     return {"item": execution["run"], "execution": execution}
 
 
+@app.post("/api/tasks/{task_id}/retry")
+def retry_research_task(task_id: int, payload: RetryRequest):
+    try:
+        return {"item": retry_task(task_id, actor=payload.actor)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/retry")
+def retry_research_run(run_id: int, payload: RetryRequest):
+    try:
+        return {"item": retry_run_problems(run_id, actor=payload.actor)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/rerun")
+def rerun_research(run_id: int, payload: RetryRequest):
+    try:
+        return rerun_research_run(run_id, actor=payload.actor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get("/api/runs")
 def runs():
     return {"items": db.list_runs()}
+
+
+@app.get("/api/runs/{run_id}/summary")
+def run_summary(run_id: int):
+    try:
+        return {"item": get_run_summary(run_id)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/tasks")

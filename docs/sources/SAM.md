@@ -8,18 +8,13 @@ It is a targeted federal-exclusion check. It is not a generic SAM entity-registr
 
 ## Acquisition
 
-Preferred acquisition is the official SAM.gov Public Entity Management API public-extract endpoint:
+V2 uses the official downloadable SAM Public Exclusions V2 ZIP/CSV as an **upload-and-compare** source. The application does not use a SAM API key and does not scrape the public SAM search UI.
 
-`https://api.sam.gov/data-services/v1/extracts`
+The user downloads the current official exclusions extract from SAM.gov and uploads it through the Sources/Research workflow. The backend parses the file once, caches it locally, and compares all selected bidders against that local dataset.
 
-The adapter requests the latest `EXCLUSION` public extract and caches the returned ZIP locally so one dataset can be searched for every bidder in the research run.
+Cached extracts live under `backend/data/source_cache/sam/` and are excluded from Git. Uploaded source bytes are stored immutably in content-addressed subdirectories so a later upload with the same official filename cannot overwrite evidence referenced by an earlier research snapshot.
 
-SAM's public-extract API requires an API key. The application therefore supports two acquisition paths:
-
-1. `SAM_API_KEY` is configured: the adapter can download/refresh the current official extract automatically.
-2. No API key is configured: the user can upload an official SAM Public Exclusions V2 ZIP or CSV from the Sources page.
-
-Cached extracts live under `backend/data/source_cache/sam/` and are excluded from Git.
+When multiple cached extracts exist, the loader selects the valid file with the newest official extract date rather than simply choosing whichever file happened to be uploaded last. Legacy flat cache files remain readable.
 
 ## Dataset semantics
 
@@ -27,7 +22,7 @@ The Public Exclusions V2 extract contains active SAM exclusions. The connector c
 
 The parser recognizes the documented V2 fields needed for provenance and identity matching, including company name, address, state, ZIP, UEI, excluding agency, exclusion type, active date, termination date, cross-reference, SAM Number, CAGE, NPI, and creation date.
 
-`Additional Comments` is treated as optional and is not required for parsing or matching.
+`Additional Comments` is optional and is not required for parsing or matching.
 
 ## Bidder field ownership
 
@@ -39,7 +34,7 @@ A confirmed active federal exclusion can propose:
 
 `state_federal_debarment = Y`
 
-The adapter deliberately does **not** propose `N` when a contractor is absent from the active SAM extract. The bidder field represents broader state/federal debarment information, and absence from the current active federal exclusion file is not sufficient evidence to erase an approved value or historical finding.
+The adapter deliberately does **not** propose `N` when a contractor is absent from the active SAM extract. Absence from the current federal exclusion file does not prove that the contractor is generally clean, licensed, legitimate, or free of other state/federal restrictions.
 
 ## Completeness and freshness
 
@@ -47,26 +42,30 @@ A current, successfully parsed official extract can produce a complete SAM sourc
 
 An extract more than two days old, or an extract whose date cannot be established, is treated as partial. A stale or undated extract may still preserve positive evidence, but it cannot produce a clean negative result or an automatic field-change proposal.
 
-Missing credentials with no cached extract produces `AUTH_REQUIRED`, not `SUCCESS_NO_MATCH`.
+If no uploaded extract is available, the source returns `SOURCE_UNAVAILABLE`, never `SUCCESS_NO_MATCH`.
 
 Malformed extracts produce `DATASET_MALFORMED`.
 
-Network failures, timeouts, and HTTP errors remain explicit source-result states and can never become a negative finding.
-
 ## Identity matching
 
-The adapter normalizes contractor names and known related companies, then compares SAM candidate records using company name plus available address, city, state, and ZIP evidence.
+The registered runtime adapter is `SamUploadedExclusionsSource`.
 
-Strong name similarity alone is not enough for automatic confirmation. Automatic confirmation requires a very strong name match plus corroborating location evidence.
+The matcher normalizes contractor names and approved related-company aliases, then compares SAM candidates using company name plus available address, city, state, and ZIP evidence.
 
-Possible matches that are not safe to auto-confirm are stored as immutable evidence with `REVIEW_REQUIRED` identity status and shown in the Review page.
+Exact normalized company-name/alias matches are always kept visible for review even when the SAM address is different. This prevents a moved company or stale address from being silently converted into `SUCCESS_NO_MATCH`.
+
+Fuzzy company-name candidates must be typo-level similar. Generic shared words such as `Electric`, `Roofing`, `Services`, or `Builders` are not enough to create a review candidate.
+
+Automatic identity confirmation requires an exact approved name/alias plus meaningful address corroboration. A shared city/state or shared ZIP by itself is not sufficient. ZIP-supported confirmation also requires the same street number and a reasonably similar normalized address.
+
+Near-exact fuzzy names with strong address evidence remain human-review items rather than automatic exclusion findings.
 
 A paralegal can mark a candidate as:
 
 - `SAME_ENTITY`
 - `DIFFERENT_ENTITY`
 
-That judgment is persisted by bidder + source + SAM record ID and reused on later runs. Confirming one candidate does not automatically reject other plausible SAM records; each materially distinct candidate remains reviewable unless it has its own stored judgment.
+That judgment is persisted by bidder + source + SAM record ID and reused on later runs.
 
 ## Evidence and audit behavior
 
@@ -76,20 +75,24 @@ Every SAM source interaction is persisted through the common research pipeline:
 
 The cached source file is referenced in the evidence snapshot with its SHA-256 hash, extract date, record count, adapter version, and parser version.
 
-Evidence snapshots are immutable. Resolving an ambiguous identity creates a new source evaluation and a new snapshot; the original ambiguous snapshot remains in history.
+Evidence snapshots are immutable. A later SAM upload cannot overwrite the source bytes referenced by an earlier snapshot. Resolving an ambiguous identity creates a new source evaluation and snapshot while preserving the original history.
 
 ## Testing
 
-SAM has fixture-based tests using the documented Public Exclusions V2 column layout. Tests cover:
+SAM has fixture-based tests covering:
 
-- CSV parsing
-- ZIP parsing
+- CSV and ZIP parsing
 - firm-only filtering
 - confirmed matches
 - clean no-match behavior
+- stale or missing extracts
 - ambiguous identities
-- stale extracts
-- missing API key/cache
+- the A-1 Duran Roofing and ABEL Electric false-positive regressions
+- exact-name records with changed/conflicting addresses
+- same-name/same-ZIP records on different streets
+- immutable same-filename cache uploads
+- newest-extract-date cache selection
+- legacy flat-cache compatibility
 - remembered identity judgments
 - evidence/proposal creation
 - explicit master approval
