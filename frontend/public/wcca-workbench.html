@@ -10,7 +10,7 @@
     body { margin: 0; }
     header { background: #111827; color: white; padding: 22px 28px; }
     header h1 { margin: 0 0 6px; font-size: 24px; }
-    header p { margin: 0; color: #cbd5e1; max-width: 900px; }
+    header p { margin: 0; color: #cbd5e1; max-width: 940px; }
     main { max-width: 1120px; margin: 24px auto; padding: 0 18px 48px; display: grid; gap: 18px; }
     .card { background: white; border: 1px solid #dde3ec; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(15,23,42,.05); }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
@@ -27,22 +27,24 @@
     .alias-list { display: grid; gap: 8px; margin: 12px 0; }
     .alias { display: flex; gap: 9px; align-items: center; border: 1px solid #e3e8ef; border-radius: 8px; padding: 10px 12px; }
     .locations { display: grid; gap: 5px; }
+    .master-grid, .comparison { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; margin-top: 12px; }
+    .master-grid > div, .comparison > div { background: #f8fafc; border-radius: 8px; padding: 10px; }
+    .master-grid span, .comparison span { display: block; color: #667085; font-size: 12px; }
+    .master-grid strong, .comparison strong { display: block; margin-top: 4px; }
     .case-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; border: 1px solid #e3e8ef; border-radius: 10px; padding: 14px; margin-top: 10px; }
     .case-grid .wide { grid-column: 1 / -1; }
     .notice { border-radius: 9px; padding: 12px 14px; background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; }
+    .notice + .notice { margin-top: 10px; }
     .success { background: #ecfdf3; border-color: #abefc6; color: #067647; }
     .error { background: #fef3f2; border-color: #fecdca; color: #b42318; }
-    .comparison { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; margin-top: 12px; }
-    .comparison > div { background: #f8fafc; border-radius: 8px; padding: 10px; }
-    .comparison span { display: block; color: #667085; font-size: 12px; }
-    .comparison strong { display: block; margin-top: 4px; }
-    @media (max-width: 720px) { .case-grid, .comparison { grid-template-columns: 1fr; } .case-grid .wide { grid-column: auto; } }
+    .required { font-weight: 700; color: #9a3412; }
+    @media (max-width: 720px) { .case-grid, .comparison, .master-grid { grid-template-columns: 1fr; } .case-grid .wide { grid-column: auto; } }
   </style>
 </head>
 <body>
 <header>
   <h1>WCCA / CCAP Research Workbench</h1>
-  <p>Guided operator-assisted Wisconsin Circuit Court Access research. The application prepares the bidder search plan, you perform the public WCCA search normally, and the result is stored as research evidence. CAPTCHA and anti-scraping controls are never bypassed.</p>
+  <p>Guided operator-assisted Wisconsin Circuit Court Access research. The app prepares the approved bidder search plan, you perform the public WCCA search normally, and the result is stored as evidence. CAPTCHA and anti-scraping controls are never bypassed.</p>
 </header>
 <main>
   <section class="card">
@@ -76,6 +78,13 @@
       </div>
     </div>
 
+    <h3 style="margin-top:22px">Current approved database values</h3>
+    <div class="master-grid">
+      <div><span>circuit_court</span><strong id="masterCircuit">—</strong></div>
+      <div><span>ccap_show150</span><strong id="masterCcap">—</strong></div>
+      <div><span>WCCA write policy</span><strong>Comparison only</strong></div>
+    </div>
+
     <h3 style="margin-top:22px">1. Confirm every planned search name</h3>
     <p class="muted">Check each box only after that exact name has been searched in statewide WCCA. Related-company aliases are kept separate; commas inside legal names are not split.</p>
     <div id="aliasList" class="alias-list"></div>
@@ -83,23 +92,25 @@
     <h3 style="margin-top:22px">Identity context</h3>
     <div id="locations" class="locations muted"></div>
 
+    <div class="notice" style="margin-top:18px"><strong>Important:</strong> “No currently displayed WCCA match” is not the same as <strong>circuit_court=N</strong>. WCCA is not the complete court record, and some records can be unavailable or no longer displayed online. A no-match is stored as source-level evidence only and will not contradict or erase an existing Y.</div>
+
     <h3 style="margin-top:22px">2. Record the result</h3>
     <div class="row" style="align-items:flex-end">
-      <label style="min-width:260px; flex:1">Outcome
+      <label style="min-width:300px; flex:1">Outcome
         <select id="outcome">
-          <option value="no_match">Complete no match</option>
+          <option value="no_match">No currently displayed WCCA match found</option>
           <option value="findings">Matched case(s)</option>
           <option value="ambiguous">Possible match / identity uncertain</option>
-          <option value="partial">Search incomplete</option>
+          <option value="partial">Search incomplete / partial</option>
           <option value="blocked">WCCA blocked / unavailable</option>
         </select>
       </label>
-      <label style="display:flex; gap:8px; align-items:center; padding-bottom:9px"><input id="complete" type="checkbox" /> I completed the intended search</label>
+      <label style="display:flex; gap:8px; align-items:center; padding-bottom:9px"><input id="complete" type="checkbox" /> I completed every intended name search</label>
       <label style="display:flex; gap:8px; align-items:center; padding-bottom:9px"><input id="identity" type="checkbox" /> I confirmed the case belongs to this contractor</label>
     </div>
 
     <div id="caseSection" hidden>
-      <div class="row between" style="margin-top:18px"><h3 style="margin:0">Case evidence</h3><button id="addCaseBtn">Add another case</button></div>
+      <div class="row between" style="margin-top:18px"><div><h3 style="margin:0">Case evidence</h3><div class="muted" style="margin-top:4px">A confirmed positive requires both <span class="required">case number</span> and <span class="required">matched party/business name</span>. Capture only contractor-relevant information.</div></div><button id="addCaseBtn">Add another case</button></div>
       <div id="caseList"></div>
     </div>
 
@@ -107,7 +118,7 @@
       <textarea id="operatorNote" placeholder="Optional: identity reasoning, result limitations, or anything another paralegal should know."></textarea>
     </label>
 
-    <div class="notice" style="margin-top:16px">For this first implementation, WCCA evidence is compared with the current <strong>circuit_court</strong> value but cannot create a master-field proposal. <strong>ccap_show150</strong> is also write-disabled until the firm's legacy rule is defined.</div>
+    <div class="notice" style="margin-top:16px">Confirmed positive cases can be compared with the current <strong>circuit_court</strong> value, but WCCA still cannot create a master-field proposal until the firm's exact legacy rule is confirmed. <strong>ccap_show150</strong> remains undefined and write-disabled.</div>
 
     <div class="row" style="margin-top:16px">
       <button id="submitBtn" class="primary">Save WCCA evidence & compare</button>
@@ -137,7 +148,11 @@
   }
 
   function blankCase() {
-    return { case_number: '', county: '', matched_party_name: '', case_type: '', case_status: '', case_url: '', note: '' };
+    return { case_number: '', county: '', matched_party_name: '', case_type: '', case_status: '', filing_date: '', disposition: '', case_url: '', note: '' };
+  }
+
+  function caseHasContent(item) {
+    return Object.values(item).some((value) => String(value || '').trim());
   }
 
   function renderCases() {
@@ -147,11 +162,13 @@
       const box = document.createElement('div');
       box.className = 'case-grid';
       box.innerHTML = `
-        <label>Case number<input type="text" data-field="case_number" value="${escapeHtml(item.case_number)}"></label>
+        <label><span><span class="required">Case number *</span></span><input type="text" data-field="case_number" value="${escapeHtml(item.case_number)}"></label>
         <label>County<input type="text" data-field="county" value="${escapeHtml(item.county)}"></label>
-        <label>Matched party/business name<input type="text" data-field="matched_party_name" value="${escapeHtml(item.matched_party_name)}"></label>
+        <label><span><span class="required">Matched party/business name *</span></span><input type="text" data-field="matched_party_name" value="${escapeHtml(item.matched_party_name)}"></label>
         <label>Case type<input type="text" data-field="case_type" value="${escapeHtml(item.case_type)}"></label>
         <label>Case status<input type="text" data-field="case_status" value="${escapeHtml(item.case_status)}"></label>
+        <label>Filing date<input type="text" data-field="filing_date" value="${escapeHtml(item.filing_date)}" placeholder="As displayed in WCCA"></label>
+        <label>Disposition<input type="text" data-field="disposition" value="${escapeHtml(item.disposition)}"></label>
         <label>Case URL<input type="text" data-field="case_url" value="${escapeHtml(item.case_url)}"></label>
         <label class="wide">Case note<input type="text" data-field="note" value="${escapeHtml(item.note)}"></label>
         <div class="wide"><button type="button" data-remove="${index}">Remove case</button></div>`;
@@ -175,6 +192,8 @@
     $('position').textContent = `Bidder ${state.index + 1} of ${state.plans.length}`;
     $('contractorName').textContent = plan.contractor_name;
     $('externalId').textContent = plan.external_id ? `Master ID ${plan.external_id}` : '';
+    $('masterCircuit').textContent = plan.master_values?.circuit_court || 'blank';
+    $('masterCcap').textContent = plan.master_values?.ccap_show150 || 'blank';
     $('prevBtn').disabled = state.index === 0;
     $('nextBtn').disabled = state.index >= state.plans.length - 1;
     $('aliasList').innerHTML = '';
@@ -197,14 +216,34 @@
   }
 
   function syncOutcome() {
-    const findings = $('outcome').value === 'findings' || $('outcome').value === 'ambiguous';
-    $('caseSection').hidden = !findings;
-    $('identity').disabled = $('outcome').value !== 'findings' && $('outcome').value !== 'partial';
+    const value = $('outcome').value;
+    const canHaveCases = value === 'findings' || value === 'ambiguous' || value === 'partial';
+    $('caseSection').hidden = !canHaveCases;
+    $('identity').disabled = value !== 'findings' && value !== 'partial';
     if ($('identity').disabled) $('identity').checked = false;
+  }
+
+  function validateConfirmedCaseInput() {
+    if (!$('identity').checked) return null;
+    const value = $('outcome').value;
+    if (value !== 'findings' && value !== 'partial') return null;
+    const cases = state.cases.filter(caseHasContent);
+    if (!cases.length) return 'A confirmed positive requires at least one case record.';
+    if (cases.some((item) => !item.case_number.trim() || !item.matched_party_name.trim())) {
+      return 'Enter both the case number and matched party/business name for every confirmed case.';
+    }
+    return null;
   }
 
   async function submit() {
     const plan = currentPlan();
+    const validationError = validateConfirmedCaseInput();
+    if (validationError) {
+      $('resultBox').className = 'notice error';
+      $('resultBox').textContent = validationError;
+      $('resultBox').hidden = false;
+      return;
+    }
     const searchedNames = [...document.querySelectorAll('input[data-search-name]:checked')].map((input) => input.dataset.searchName);
     $('submitBtn').disabled = true;
     $('submitStatus').textContent = 'Saving…';
@@ -225,9 +264,11 @@
       });
       const item = response.item;
       const c = item.comparison;
+      const observed = c.observed_value ?? 'no master-field conclusion';
       $('resultBox').className = 'notice success';
       $('resultBox').innerHTML = `<strong>${escapeHtml(item.status)}</strong> · completeness ${escapeHtml(item.completeness_status)} · identity ${escapeHtml(item.identity_status)}
-        <div class="comparison"><div><span>Current circuit_court</span><strong>${escapeHtml(c.current_value || 'blank')}</strong></div><div><span>Observed WCCA value</span><strong>${escapeHtml(c.observed_value ?? 'unknown')}</strong></div><div><span>Different?</span><strong>${c.different ? 'Yes' : 'No'}</strong></div></div>
+        <div class="comparison"><div><span>Current circuit_court</span><strong>${escapeHtml(c.current_value || 'blank')}</strong></div><div><span>WCCA field observation</span><strong>${escapeHtml(observed)}</strong></div><div><span>Comparison</span><strong>${escapeHtml(c.comparison_status)}</strong></div></div>
+        <div class="comparison"><div><span>Current ccap_show150</span><strong>${escapeHtml(c.ccap_show150?.current_value || 'blank')}</strong></div><div><span>Observed ccap_show150</span><strong>undefined / no write</strong></div><div><span>Master change proposal</span><strong>${c.proposal_created ? 'Created' : 'None'}</strong></div></div>
         <div style="margin-top:10px">${escapeHtml(c.reason)}</div>${item.warnings.length ? `<div style="margin-top:8px"><strong>Warnings:</strong> ${escapeHtml(item.warnings.join(' · '))}</div>` : ''}`;
       $('resultBox').hidden = false;
       $('submitStatus').textContent = `Saved snapshot #${item.snapshot_id}`;
