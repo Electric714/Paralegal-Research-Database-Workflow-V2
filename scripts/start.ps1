@@ -129,7 +129,7 @@ if (-not (Test-AppOnline)) {
 
     $StartArgs = @{
         FilePath = $VenvPython
-        ArgumentList = @('-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000')
+        ArgumentList = @('-m', 'uvicorn', 'app.main_with_wcca:app', '--host', '127.0.0.1', '--port', '8000')
         WorkingDirectory = $Backend
         WindowStyle = 'Hidden'
         RedirectStandardOutput = $StdoutLog
