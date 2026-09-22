@@ -20,7 +20,11 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
         frozenset({"osha"}),
         "OSHA finding flag only; severe-violation and years semantics remain evidence-only pending firm confirmation.",
     ),
-    "wcrb": SourceFieldMapping("wcrb", frozenset({"wc", "wc_date"}), "Workers-compensation fields."),
+    "wcrb": SourceFieldMapping(
+        "wcrb",
+        frozenset({"wc"}),
+        "Confirmed WCRB coverage may support the workers-compensation flag. wc_date ownership is intentionally withheld until the firm's field semantics are confirmed.",
+    ),
     "wcca": SourceFieldMapping(
         "wcca",
         frozenset(),
@@ -38,8 +42,8 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     ),
     "wisdot": SourceFieldMapping(
         "wisdot",
-        frozenset(),
-        "Exact bidder-field ownership must be confirmed before automatic proposals.",
+        frozenset({"state_federal_debarment"}),
+        "Confirmed current WisDOT debarred/suspended/ineligible records may propose Y only; no-match never emits N. Finals/project-status findings remain evidence-only.",
     ),
     "dol_enforcement": SourceFieldMapping(
         "dol_enforcement",
@@ -54,7 +58,7 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "responsible_mn": SourceFieldMapping(
         "responsible_mn",
         frozenset(),
-        "Exact bidder-field ownership must be confirmed before automatic proposals.",
+        "Comparison-only Responsible Minnesota ineligibility evidence. mndol_ineligibility is the candidate legacy field, but automatic ownership is disabled until the firm's exact semantics are confirmed.",
     ),
 }
 
