@@ -38,7 +38,7 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "violation_tracker": SourceFieldMapping(
         "violation_tracker",
         frozenset(),
-        "Cross-agency evidence-only source. Findings may be stored and compared, but Violation Tracker intentionally owns no master fields and cannot directly create master-field proposals.",
+        "Cross-agency evidence-only source. Findings may be stored and compared, but Violation Tracker intentionally owns no master fields and must not directly create master-field proposals.",
     ),
     "wisdot": SourceFieldMapping(
         "wisdot",
