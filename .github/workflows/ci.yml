@@ -20,6 +20,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app
       - run: python -c "from app.main import app; print(app.title)"
+      - run: python -c "from app.main_with_wcca import app; print(app.title); assert any(getattr(r, 'path', '') == '/api/sources/wcca/status' for r in app.router.routes)"
       - run: pytest -q
 
   frontend:
