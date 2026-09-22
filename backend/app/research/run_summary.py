@@ -138,6 +138,12 @@ def get_run_summary(run_id: int) -> dict[str, Any]:
         if retryable:
             source_counts[source_key]["retryable"] += 1
 
+        source_key = str(item["source_key"])
+        if source_key not in source_counts:
+            source_counts[source_key] = {"source_key": source_key, "expected": 0, **_empty_counts(), "change_count": 0}
+        source_counts[source_key]["expected"] += 1
+        source_counts[source_key][bucket] += 1
+
         task_proposals = proposals_by_task_key.get((int(item["bidder_id"]), source_key), [])
         source_counts[source_key]["change_count"] += len(task_proposals)
 
