@@ -8,6 +8,7 @@ import pytest
 
 from app import database as db
 from app.import_validation import validate_bidder_rows
+from app.research import executor
 from app.research.matching import score_candidate
 from app.research.models import (
     CompletenessStatus,
@@ -18,6 +19,7 @@ from app.research.models import (
 )
 from app.research.service import list_tasks, persist_source_result, review_change
 from app.research.sources.base import ContractorContext, ResearchSource
+from app.sources import SOURCES
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -45,6 +47,17 @@ class FixtureOshaSource(ResearchSource):
                 evidence=[EvidenceRecord(field_name="osha", observed_value=payload["osha_flag"])],
             )
         )
+
+
+class FailingPrepareSource(ResearchSource):
+    source_key = "osha"
+    display_name = "Failing prepare fixture"
+
+    def prepare(self) -> None:
+        raise RuntimeError("prepare exploded")
+
+    def search(self, contractor: ContractorContext) -> SourceResult:
+        raise AssertionError("search must not run after prepare failure")
 
 
 @pytest.fixture()
@@ -97,6 +110,11 @@ def test_clean_negative_requires_complete_source_result():
     complete = incomplete.model_copy(update={"completeness_status": CompletenessStatus.COMPLETE})
     assert incomplete.is_clean_negative is False
     assert complete.is_clean_negative is True
+
+
+def test_implemented_dol_source_is_exposed_as_ready():
+    dol = next(source for source in SOURCES if source["key"] == "dol_enforcement")
+    assert dol["status"] == "ready"
 
 
 def test_fixture_adapter_and_approval_pipeline(isolated_db):
@@ -175,6 +193,55 @@ def test_ambiguous_or_partial_evidence_never_auto_proposes(isolated_db):
     persisted = persist_source_result(task_id, result)
     assert persisted["proposal_ids"] == []
     assert db.get_bidder(bidder_id)["osha"] == "N"
+
+
+def test_non_success_status_cannot_propose_even_if_complete_and_confirmed(isolated_db):
+    db.replace_master_database(
+        "master.csv",
+        ["id", "contractor_name", "osha"],
+        [{"id": "8", "contractor_name": "Contradictory Result LLC", "osha": "N"}],
+        str(isolated_db / "master.csv"),
+    )
+    bidder_id = db.active_bidder_ids()[0]
+    run = db.create_run(None, ["osha"], 1)
+    task_id = list_tasks(run["id"])[0]["id"]
+
+    result = SourceResult(
+        source_key="osha",
+        contractor_id=bidder_id,
+        status=SourceResultStatus.PARTIAL_RESULTS,
+        identity_status=IdentityStatus.CONFIRMED,
+        completeness_status=CompletenessStatus.COMPLETE,
+        searched_name="Contradictory Result LLC",
+        evidence=[EvidenceRecord(field_name="osha", observed_value="Y")],
+    )
+    persisted = persist_source_result(task_id, result)
+    assert persisted["proposal_ids"] == []
+    assert db.get_bidder(bidder_id)["osha"] == "N"
+
+
+def test_prepare_failure_becomes_failed_tasks_without_aborting_run(isolated_db, monkeypatch):
+    db.replace_master_database(
+        "master.csv",
+        ["id", "contractor_name", "osha"],
+        [{"id": "9", "contractor_name": "Prepare Failure LLC", "osha": "N"}],
+        str(isolated_db / "master.csv"),
+    )
+    run = db.create_run(None, ["osha"], 1)
+    monkeypatch.setattr(executor, "implemented_source_keys", lambda: frozenset({"osha"}))
+    monkeypatch.setattr(executor, "create_source", lambda source_key: FailingPrepareSource())
+
+    execution = executor.execute_research_run(run["id"])
+
+    assert execution["run"]["status"] == "partial"
+    assert execution["executed"] == 1
+    assert execution["status_counts"] == {SourceResultStatus.PARSER_FAILURE.value: 1}
+    task = list_tasks(run["id"])[0]
+    assert task["status"] == SourceResultStatus.PARSER_FAILURE.value
+    with db.connect() as conn:
+        check = conn.execute("SELECT * FROM source_checks WHERE research_task_id = ?", (task["id"],)).fetchone()
+    assert check["completeness_status"] == CompletenessStatus.UNKNOWN.value
+    assert check["acquisition_method"] == "adapter_prepare_error"
 
 
 def test_reimport_keeps_historical_bidder_for_evidence(isolated_db):
