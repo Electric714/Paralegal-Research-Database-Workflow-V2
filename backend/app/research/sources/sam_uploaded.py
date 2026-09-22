@@ -39,7 +39,8 @@ def _location_corroborates(
     record: SamExclusionRecord,
     match: CandidateMatch,
 ) -> bool:
-    """Require more than a shared city/state before treating identities as the same."""
+    """Require meaningful address evidence, not merely a shared city/state/ZIP."""
+
     master_state = normalize_text(contractor.state)
     candidate_state = normalize_text(record.state)
     if master_state and candidate_state and master_state != candidate_state:
@@ -55,32 +56,39 @@ def _location_corroborates(
 
     master_number = _street_number(contractor.address_1)
     candidate_number = _street_number(record.address_1)
-    street_number_compatible = (
-        not (master_number and candidate_number) or master_number == candidate_number
+    street_number_match = bool(
+        master_number and candidate_number and master_number == candidate_number
     )
+    street_number_compatible = (
+        not (master_number and candidate_number) or street_number_match
+    )
+
     address_match = (
         bool(contractor.address_1 and record.address_1)
         and match.address_score >= 0.90
         and street_number_compatible
     )
 
-    return (zip_match and city_compatible) or address_match
+    # ZIP alone is not enough: two unrelated companies can share a ZIP and city.
+    # A ZIP-supported confirmation also needs the same street number plus a reasonably
+    # similar normalized address.
+    zip_supported_address_match = (
+        zip_match
+        and city_compatible
+        and street_number_match
+        and match.address_score >= 0.75
+    )
+
+    return address_match or zip_supported_address_match
 
 
 class SamUploadedExclusionsSource(SamExclusionsSource):
-    """SAM exclusions adapter that only uses a locally uploaded official extract.
+    """SAM exclusions adapter for a locally uploaded official Public V2 extract."""
 
-    This intentionally performs no SAM.gov API calls. The user supplies the official
-    Public Exclusions V2 CSV/ZIP through the application, and research runs compare
-    that local dataset against the approved bidder database.
-    """
-
-    adapter_version = "1.3.0"
+    adapter_version = "1.4.0"
 
     def __init__(self, *, cache_dir: Path | None = None, today: date | None = None) -> None:
-        # Force the parent adapter's API key to empty so accidental network refreshes
-        # cannot occur even if SAM_API_KEY exists in the environment.
-        super().__init__(api_key="", cache_dir=cache_dir, today=today)
+        super().__init__(cache_dir=cache_dir, today=today)
 
     def health_check(self) -> dict:
         cached = load_cached_extract(cache_dir=self.cache_dir)
@@ -128,13 +136,8 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
             )
 
     def _candidate_records(self, contractor: ContractorContext) -> list[SamExclusionRecord]:
-        """Return exact names first; fuzzy candidates must be typo-level similar.
+        """Prefer exact approved names; fuzzy candidates must be typo-level similar."""
 
-        The previous 72% fuzzy cutoff produced noisy candidate lists for companies
-        sharing generic words such as Electric, Roofing, Services, or Builders. A
-        shared city/state made that noise worse. Exact approved names/aliases remain
-        fully supported, while fuzzy names are now restricted to near-exact variants.
-        """
         names = [contractor.contractor_name]
         if contractor.related_companies.strip():
             names.extend(
@@ -157,8 +160,8 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
         for normalized in normalized_names:
             add_name(normalized)
 
-        # An exact approved name/alias is stronger than fuzzy alternatives and also
-        # avoids burying a real record under dozens of generic-word lookalikes.
+        # Exact approved names/aliases are important enough to review even if SAM's
+        # stored address has changed, so do not bury them under fuzzy alternatives.
         if result:
             return result
 
@@ -194,17 +197,24 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
         )
         location_corroborated = _location_corroborates(contractor, record, match)
 
-        # Only an exact approved company name/alias plus meaningful location
-        # corroboration can auto-confirm. Near-exact/fuzzy names remain manual review
-        # even when the address looks right.
+        # Only an exact approved company name/alias plus meaningful address evidence
+        # can auto-confirm an exclusion.
         auto_confirmable = exact_name and location_corroborated
 
-        # Fuzzy candidates without independent location corroboration are noise, not
-        # a useful identity-review item. Capping the score below the parent's 0.72
-        # candidate floor removes them before the result is classified.
         score = match.score
-        if not exact_name and (match.name_score < 0.94 or not location_corroborated):
-            score = min(score, 0.71)
+        if exact_name and not location_corroborated:
+            # Exact-name records must survive the parent's candidate floor so a moved
+            # company or conflicting SAM address becomes review-required rather than
+            # a false SUCCESS_NO_MATCH.
+            score = max(score, 0.80)
+        elif not exact_name:
+            if match.name_score >= 0.94 and location_corroborated:
+                # Near-exact names with independent address evidence remain visible,
+                # but only for human review.
+                score = max(score, 0.80)
+            else:
+                # Generic-word lookalikes are noise and should not enter review.
+                score = min(score, 0.71)
 
         return CandidateMatch(
             record=match.record,

@@ -146,6 +146,55 @@ def test_exact_name_same_city_state_but_wrong_location_is_not_auto_confirmed(iso
     assert result.evidence == []
 
 
+def test_exact_name_with_completely_different_location_still_requires_review(isolated_db, tmp_path):
+    source = _source(
+        tmp_path,
+        [
+            {"Name": "Example Builders LLC", "Address 1": "999 Desert Road", "City": "Phoenix", "State / Province": "AZ", "Zip Code": "85001", "SAM Number": "X2"},
+        ],
+    )
+    result = source.search(
+        ContractorContext(
+            internal_id=5,
+            external_id="5",
+            contractor_name="Example Builders LLC",
+            address_1="12 Oak Road",
+            city="Madison",
+            state="WI",
+            zip="53703",
+        )
+    )
+
+    assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
+    assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
+    assert result.normalized_payload["candidate_count"] == 1
+    assert result.evidence == []
+
+
+def test_same_name_and_zip_but_different_street_is_not_auto_confirmed(isolated_db, tmp_path):
+    source = _source(
+        tmp_path,
+        [
+            {"Name": "Example Builders LLC", "Address 1": "999 Pine Street", "City": "Madison", "State / Province": "WI", "Zip Code": "53703", "SAM Number": "X3"},
+        ],
+    )
+    result = source.search(
+        ContractorContext(
+            internal_id=6,
+            external_id="6",
+            contractor_name="Example Builders LLC",
+            address_1="12 Oak Road",
+            city="Madison",
+            state="WI",
+            zip="53703",
+        )
+    )
+
+    assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
+    assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
+    assert result.evidence == []
+
+
 def test_near_exact_name_with_same_location_stays_manual_review(isolated_db, tmp_path):
     source = _source(
         tmp_path,
