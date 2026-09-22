@@ -45,6 +45,21 @@ type Run = {
   source_keys: string[];
   message?: string;
 };
+type RunSummaryCounts = { completed: number; no_match: number; ambiguous: number; partial: number; blocked: number; failed: number; not_checked: number };
+type RunSummarySource = RunSummaryCounts & { source_key: string; expected: number; change_count: number; retryable: number };
+type RunSummaryTask = {
+  task_id: number; source_key: string; status: string; summary_status: keyof RunSummaryCounts;
+  identity_status?: string | null; completeness_status?: string | null; identity_confidence?: number | null;
+  attempt_count: number; retryable: boolean;
+  checked_at?: string | null; source_url?: string | null; source_record_id?: string | null; snapshot_id?: number | null;
+  changes: ReviewItem[];
+};
+type RunSummaryBidder = { bidder_id: number; external_id?: string | null; contractor_name: string; sources: RunSummaryTask[] };
+type RunSummary = {
+  run: Run; expected_tasks: number; persisted_tasks: number; accounted_tasks: number; safe_complete_tasks: number;
+  attention_tasks: number; retryable_task_count: number; counts: RunSummaryCounts; raw_status_counts: Record<string, number>; change_count: number;
+  pending_change_count: number; integrity_ok: boolean; integrity_issues: string[]; sources: RunSummarySource[]; bidders: RunSummaryBidder[];
+};
 type DashboardData = {
   bidder_count: number;
   source_count: number;
@@ -216,6 +231,7 @@ export default function App() {
   const [bidders, setBidders] = useState<Bidder[]>([]);
   const [bidderTotal, setBidderTotal] = useState(0);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
   const [identityReviewItems, setIdentityReviewItems] = useState<IdentityReviewItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
@@ -231,6 +247,7 @@ export default function App() {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [samStatus, setSamStatus] = useState<SamStatus | null>(null);
   const [samMessage, setSamMessage] = useState("");
+  const [summaryRunId, setSummaryRunId] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const samSourceInput = useRef<HTMLInputElement>(null);
   const samResearchInput = useRef<HTMLInputElement>(null);
@@ -294,6 +311,80 @@ export default function App() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [search]);
+
+  const loadRunSummary = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load research run summary.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryResearchTask = async (taskId: number, runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/tasks/${taskId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to retry research task.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryRunProblems = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/runs/${runId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to retry research problems.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rerunResearch = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request<{ item: Run }>(`/api/runs/${runId}/rerun`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${result.item.id}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(result.item.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create a fresh research re-run.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -657,8 +748,46 @@ export default function App() {
 
               <Card className="run-history">
                 <div className="card-heading"><div><span className="section-kicker">History</span><h2>Research Runs</h2></div></div>
-                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span></div>)}
+                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span><div className="button-row"><button className="btn ghost small" disabled={busy} onClick={() => void loadRunSummary(run.id)}>Summary</button><button className="btn ghost small" disabled={busy} onClick={() => void rerunResearch(run.id)}><Play size={13} /> Run Again</button></div></div>)}
               </Card>
+
+              {runSummary && summaryRunId && (
+                <Card className="run-summary-card">
+                  <div className="card-heading">
+                    <div><span className="section-kicker">Research control panel</span><h2>Run #{summaryRunId} Summary</h2><p>{runSummary.expected_tasks} expected bidder × source checks · reconstructed from persisted research state.</p></div>
+                    <div className="button-row">
+                      <StatusPill status={runSummary.integrity_ok ? "completed" : "failed"} />
+                      <button className="btn secondary small" disabled={busy || runSummary.retryable_task_count === 0} onClick={() => void retryRunProblems(summaryRunId)}><RefreshCw size={13} /> Retry Problems ({runSummary.retryable_task_count})</button>
+                      <button className="btn ghost small" disabled={busy} onClick={() => void rerunResearch(summaryRunId)}><Play size={13} /> Run Again</button>
+                      <button className="icon-button" onClick={() => { setRunSummary(null); setSummaryRunId(null); }}><X size={16} /></button>
+                    </div>
+                  </div>
+                  {!runSummary.integrity_ok && <div className="warning-box"><AlertTriangle size={16} /><div><strong>Run reconciliation problem</strong><span>{runSummary.integrity_issues.join(" · ")}</span></div></div>}
+                  <div className="summary-metrics">
+                    <SummaryMetric label="Completed" value={runSummary.counts.completed} />
+                    <SummaryMetric label="No match" value={runSummary.counts.no_match} />
+                    <SummaryMetric label="Changes" value={runSummary.change_count} />
+                    <SummaryMetric label="Ambiguous" value={runSummary.counts.ambiguous} />
+                    <SummaryMetric label="Partial" value={runSummary.counts.partial} />
+                    <SummaryMetric label="Blocked" value={runSummary.counts.blocked} />
+                    <SummaryMetric label="Failed" value={runSummary.counts.failed} />
+                    <SummaryMetric label="Not checked" value={runSummary.counts.not_checked} />
+                  </div>
+                  <div className="summary-section">
+                    <span className="section-kicker">Source reconciliation</span>
+                    <div className="table-wrap"><table><thead><tr><th>Source</th><th>Expected</th><th>Complete</th><th>No match</th><th>Changes</th><th>Ambiguous</th><th>Partial</th><th>Blocked</th><th>Failed</th><th>Retryable</th><th>Not checked</th></tr></thead><tbody>
+                      {runSummary.sources.map((source) => <tr key={source.source_key}><td><strong>{source.source_key.toUpperCase()}</strong></td><td>{source.expected}</td><td>{source.completed}</td><td>{source.no_match}</td><td>{source.change_count}</td><td>{source.ambiguous}</td><td>{source.partial}</td><td>{source.blocked}</td><td>{source.failed}</td><td>{source.retryable}</td><td>{source.not_checked}</td></tr>)}
+                    </tbody></table></div>
+                  </div>
+                  <div className="summary-section">
+                    <span className="section-kicker">Bidder × source detail</span>
+                    <div className="table-wrap summary-detail-table"><table><thead><tr><th>Bidder</th><th>Source</th><th>Outcome</th><th>Attempts</th><th>Identity</th><th>Completeness</th><th>Relevant DB changes</th><th>Evidence</th><th>Action</th></tr></thead><tbody>
+                      {runSummary.bidders.flatMap((bidder) => bidder.sources.map((task) => <tr key={task.task_id}><td>{bidder.contractor_name}</td><td>{task.source_key.toUpperCase()}</td><td><StatusPill status={task.summary_status} /></td><td>{task.attempt_count}</td><td>{task.identity_status ? statusLabel(task.identity_status) : "—"}</td><td>{task.completeness_status ? statusLabel(task.completeness_status) : "—"}</td><td>{task.changes.length ? task.changes.map((change) => `${prettyField(change.field_name)}: ${change.current_value || "—"} → ${change.proposed_value || "—"}`).join(" · ") : "None"}</td><td>{task.source_url ? <a href={task.source_url} target="_blank" rel="noreferrer" className="text-button">Source <ExternalLink size={13} /></a> : task.snapshot_id ? `Stored snapshot #${task.snapshot_id}` : "—"}</td><td>{task.retryable ? <button className="btn ghost small" disabled={busy} onClick={() => void retryResearchTask(task.task_id, summaryRunId)}><RefreshCw size={13} /> Retry</button> : <span className="muted">—</span>}</td></tr>))}
+                    </tbody></table></div>
+                  </div>
+                  <p className="modal-note">Retry repeats only transient or incomplete bidder × source tasks and preserves every prior check. Run Again creates a fresh run against the current approved database. Only source-owned bidder fields can appear as database changes.</p>
+                </Card>
+              )}
             </div>
           )}
 
@@ -815,6 +944,10 @@ export default function App() {
       {busy && <div className="busy-indicator"><RefreshCw size={15} className="spin" /> Working…</div>}
     </div>
   );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: number }) {
+  return <div className="summary-metric"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function Metric({ label, value, hint }: { label: string; value: string | number; hint: string }) {
