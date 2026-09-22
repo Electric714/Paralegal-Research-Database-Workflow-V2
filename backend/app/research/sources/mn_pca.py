@@ -109,6 +109,14 @@ def _party_segments(value: str) -> list[str]:
 
 
 def _should_review_name_variant(approved_name: str, candidate_name: str, wratio: float) -> bool:
+    """Keep plausible entity-name variants visible instead of emitting a false clean no-match.
+
+    WRatio catches typos and punctuation variation. token_set_ratio catches common legal-name
+    expansions such as "Acme Construction" vs "Acme Construction Services" where all tokens
+    of the shorter approved name are present in the longer source name. These are review-only;
+    they never become automatic confirmed matches.
+    """
+
     if wratio >= FUZZY_REVIEW_THRESHOLD:
         return True
     approved_tokens = approved_name.split()

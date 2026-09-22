@@ -140,7 +140,7 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             adapter = adapters[source_key]
             try:
                 result = adapter.search(contractor)
-            except Exception as exc:
+            except Exception as exc:  # source bugs must not abort an entire research run
                 result = _unexpected_failure(task, contractor, exc)
                 db.add_diagnostic(
                     "ERROR",
