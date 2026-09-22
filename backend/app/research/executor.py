@@ -31,7 +31,13 @@ def _contractor_context(bidder_id: int) -> ContractorContext:
     )
 
 
-def _unexpected_failure(task: dict[str, Any], contractor: ContractorContext, exc: Exception) -> SourceResult:
+def _unexpected_failure(
+    task: dict[str, Any],
+    contractor: ContractorContext,
+    exc: Exception,
+    *,
+    phase: str = "execution",
+) -> SourceResult:
     return SourceResult(
         source_key=str(task["source_key"]),
         contractor_id=int(task["bidder_id"]),
@@ -40,8 +46,8 @@ def _unexpected_failure(task: dict[str, Any], contractor: ContractorContext, exc
         completeness_status=CompletenessStatus.UNKNOWN,
         searched_name=contractor.contractor_name,
         searched_address=contractor.address_1,
-        warnings=[f"Unexpected adapter failure: {type(exc).__name__}: {exc}"],
-        acquisition_method="adapter_error",
+        warnings=[f"Unexpected adapter {phase} failure: {type(exc).__name__}: {exc}"],
+        acquisition_method=f"adapter_{phase}_error",
     )
 
 
@@ -58,7 +64,7 @@ def _set_run_status(run_id: int, status: str, message: str, *, completed: bool =
 
 
 def execute_research_run(run_id: int) -> dict[str, Any]:
-    db.get_run(run_id)  # validates that the run exists
+    db.get_run(run_id)
     tasks = list_tasks(run_id)
     pending = [task for task in tasks if str(task["status"]) == SourceResultStatus.NOT_CHECKED.value]
     executable = [task for task in pending if task["source_key"] in implemented_source_keys()]
@@ -100,35 +106,51 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         },
     )
 
-    adapters = {}
+    adapters: dict[str, Any] = {}
+    prepare_errors: dict[str, Exception] = {}
     status_counts: Counter[str] = Counter()
     proposal_count = 0
 
     for source_key in sorted({str(task["source_key"]) for task in executable}):
-        adapter = create_source(source_key)
-        if adapter is None:
-            continue
-        adapter.prepare()
-        adapters[source_key] = adapter
+        try:
+            adapter = create_source(source_key)
+            if adapter is None:
+                raise RuntimeError(f"Registered source {source_key!r} could not be created.")
+            adapter.prepare()
+            adapters[source_key] = adapter
+        except Exception as exc:
+            prepare_errors[source_key] = exc
+            db.add_diagnostic(
+                "ERROR",
+                "Source adapter preparation failed unexpectedly",
+                source_key=source_key,
+                stage="research",
+                details={"run_id": run_id, "error": repr(exc)},
+            )
 
     for task in executable:
         task_id = int(task["id"])
         bidder_id = int(task["bidder_id"])
         source_key = str(task["source_key"])
-        adapter = adapters[source_key]
         contractor = _contractor_context(bidder_id)
-        try:
-            result = adapter.search(contractor)
-        except Exception as exc:  # source bugs must not abort an entire research run
-            result = _unexpected_failure(task, contractor, exc)
-            db.add_diagnostic(
-                "ERROR",
-                "Source adapter failed unexpectedly",
-                source_key=source_key,
-                bidder_name=contractor.contractor_name,
-                stage="research",
-                details={"run_id": run_id, "task_id": task_id, "error": repr(exc)},
-            )
+
+        if source_key in prepare_errors:
+            result = _unexpected_failure(task, contractor, prepare_errors[source_key], phase="prepare")
+        else:
+            adapter = adapters[source_key]
+            try:
+                result = adapter.search(contractor)
+            except Exception as exc:
+                result = _unexpected_failure(task, contractor, exc)
+                db.add_diagnostic(
+                    "ERROR",
+                    "Source adapter failed unexpectedly",
+                    source_key=source_key,
+                    bidder_name=contractor.contractor_name,
+                    stage="research",
+                    details={"run_id": run_id, "task_id": task_id, "error": repr(exc)},
+                )
+
         persisted = persist_source_result(task_id, result)
         status_counts[result.status.value] += 1
         proposal_count += len(persisted["proposal_ids"])

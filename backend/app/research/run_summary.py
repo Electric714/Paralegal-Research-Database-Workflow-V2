@@ -6,6 +6,7 @@ from typing import Any
 from .. import database as db
 from .field_mappings import source_owns_field
 from .models import SourceResultStatus
+from .retry_policy import is_retryable_status
 
 
 BLOCKED_STATUSES = {
@@ -117,6 +118,7 @@ def get_run_summary(run_id: int) -> dict[str, Any]:
     source_counts: dict[str, dict[str, Any]] = {}
     bidder_rows: dict[int, dict[str, Any]] = {}
     raw_status_counts: Counter[str] = Counter()
+    retryable_task_count = 0
 
     for row in rows:
         item = dict(row)
@@ -124,12 +126,17 @@ def get_run_summary(run_id: int) -> dict[str, Any]:
         raw_status_counts[status] += 1
         bucket = _bucket(status, item.get("identity_status"), item.get("completeness_status"))
         counts[bucket] += 1
+        retryable = is_retryable_status(status)
+        if retryable:
+            retryable_task_count += 1
 
         source_key = str(item["source_key"])
         if source_key not in source_counts:
-            source_counts[source_key] = {"source_key": source_key, "expected": 0, **_empty_counts(), "change_count": 0}
+            source_counts[source_key] = {"source_key": source_key, "expected": 0, **_empty_counts(), "change_count": 0, "retryable": 0}
         source_counts[source_key]["expected"] += 1
         source_counts[source_key][bucket] += 1
+        if retryable:
+            source_counts[source_key]["retryable"] += 1
 
         task_proposals = proposals_by_task_key.get((int(item["bidder_id"]), source_key), [])
         source_counts[source_key]["change_count"] += len(task_proposals)
@@ -154,6 +161,7 @@ def get_run_summary(run_id: int) -> dict[str, Any]:
                 "completeness_status": item.get("completeness_status"),
                 "identity_confidence": item.get("identity_confidence"),
                 "attempt_count": int(item["attempt_count"] or 0),
+                "retryable": retryable,
                 "checked_at": item.get("checked_at"),
                 "source_url": item.get("source_url"),
                 "source_record_id": item.get("source_record_id"),
@@ -180,6 +188,7 @@ def get_run_summary(run_id: int) -> dict[str, Any]:
         "accounted_tasks": accounted,
         "safe_complete_tasks": safe_complete,
         "attention_tasks": attention,
+        "retryable_task_count": retryable_task_count,
         "counts": counts,
         "raw_status_counts": dict(raw_status_counts),
         "change_count": len(proposal_rows),
