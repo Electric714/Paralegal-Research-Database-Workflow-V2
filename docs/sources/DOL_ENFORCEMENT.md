@@ -1,301 +1,126 @@
-# U.S. Department of Labor Enforcement Data source
+# U.S. Department of Labor Enforcement Data
 
-## Purpose
+## Decision
 
-The `dol_enforcement` source should research Department of Labor enforcement records for bidders already present in the approved master database. It is not a general employer-discovery tool, and it must never write directly to the master database.
+Use the official U.S. Department of Labor Open Data Portal v4 API. Do not scrape the retired `enforcedata.dol.gov` interface.
 
-The firm's legacy source URL points to `https://enforcedata.dol.gov/views/data_catalogs.php`. DOL announced in February 2026 that the old enforcement-data page was being decommissioned and replaced by the modern Open Data Portal.
+- Portal: `https://data.dol.gov/`
+- API base: `https://apiprod.dol.gov/v4`
+- Keyless dataset catalog: `https://apiprod.dol.gov/v4/datasets`
+- Local credential name: `DOL_API_KEY`
 
-Current public portal: `https://data.dol.gov/`
+DOL announced in February 2026 that the new Open Data Portal replaces the old enforcement-data page. DOL describes API registration as free. An API key is required for metadata/data calls and must not be committed to a public repository or exposed in logs.
 
-Current API base: `https://apiprod.dol.gov/v4`
+## Phase 1 scope
 
-Keyless dataset catalog: `https://apiprod.dol.gov/v4/datasets`
+Phase 1 targets Wage and Hour Division (WHD) enforcement/compliance actions because this is the strongest match to the firm's contractor/bidder research workflow. The adapter discovers the current WHD compliance/enforcement dataset from the keyless v4 dataset catalog instead of hard-coding a legacy v1 endpoint.
 
-Recommended first dataset: Wage and Hour Division (WHD) Compliance Action / Enforcement data.
+The project already has a dedicated OSHA source, so `dol_enforcement` does not use DOL as a second OSHA collector.
 
-## Research conclusion
+## API behavior followed from DOL documentation
 
-Do **not** implement this source by scraping the retired enforcement-data web UI.
+The adapter follows the v4 API structure documented by DOL:
 
-The best acquisition path for this project is the official DOL v4 API because:
+`https://apiprod.dol.gov/v4/get/<agency>/<endpoint>/<format>`
 
-1. The API is the replacement path DOL now directs users to.
-2. It supports machine-readable JSON/CSV/XML responses.
-3. It supports field selection, sorting, pagination, and conditional filtering.
-4. It lets us request only records relevant to approved bidder names instead of repeatedly downloading or scraping a large national dataset.
-5. The dataset catalog can be queried without an API key so the application can verify that expected datasets still exist before a run.
-6. The application can preserve an explicit `AUTH_REQUIRED` state when a DOL API key has not been configured instead of returning a false negative.
+Metadata uses:
 
-DOL's current API guide documents a maximum response of 10,000 records or 5 MB per request, whichever comes first, plus `offset`, `fields`, `sort`, `sort_by`, and JSON `filter_object` parameters. The API guide also states that an API key is required for dataset metadata/data requests and warns against exposing that key publicly.
+`https://apiprod.dol.gov/v4/get/<agency>/<endpoint>/json/metadata`
 
-## Why WHD should be Phase 1
+DOL documents these relevant request parameters:
 
-The old DOL Enforcement Database covered multiple agencies, including WHD, EBSA, MSHA, OFCCP, and OSHA. This project already has a dedicated OSHA adapter, so OSHA records should not be duplicated through `dol_enforcement`.
+- `X-API-KEY` for authenticated metadata/data requests
+- `limit` and `offset` for pagination
+- `fields` for optional field selection
+- `sort` / `sort_by`
+- `filter_object` for conditional filtering
+- supported filter operators include `eq`, `neq`, `gt`, `lt`, `in`, `not_in`, and `like`
+- filters may combine AND/OR conditions
 
-WHD is the strongest first fit because its public compliance-action data contains concluded employer investigations and identifies the employer, employer location, violation findings, back wages, employees affected, monetary penalties, findings dates, and law-specific enforcement counts.
+The current implementation uses JSON responses, `filter_object`, `limit`, and `offset`. It does not persist the authenticated request URL because DOL documents the API key as a request parameter.
 
-The public WHD dataset contains concluded compliance actions since FY 2005. DOL describes it as including whether violations were found, back wages, employees due back wages, and civil money penalties.
+## Credential handling
 
-WHD also separately publishes government-contract enforcement statistics for laws including the Davis-Bacon and Related Acts (DBRA), Service Contract Act (SCA), and Contract Work Hours and Safety Standards Act (CWHSSA). Those are particularly relevant to this bidder/contractor database.
+Set `DOL_API_KEY` in the local process environment. The key must never be:
 
-## Relationship to bidder database fields
+- committed to Git
+- stored in evidence snapshots
+- written into audit logs
+- included in warnings or exception text
+- retained in source URLs
 
-The current bidder schema includes:
+If `DOL_API_KEY` is missing, the source returns `AUTH_REQUIRED`; it never converts missing credentials into a no-match result.
+
+## Dataset discovery and schema validation
+
+Before bidder queries, the adapter:
+
+1. Walks the keyless `/v4/datasets` catalog.
+2. Selects the strongest WHD compliance/enforcement dataset candidate.
+3. Uses the returned agency abbreviation and `api_url` to build v4 metadata/data endpoints.
+4. Retrieves metadata with the configured API key.
+5. Requires a recognized employer-name field before research can continue.
+6. Resolves known identity-field variants for employer name, address, city, state, ZIP, and case identifier.
+7. Fails visibly if the dataset/catalog structure no longer matches expectations.
+
+This keeps the integration resilient to DOL changing the current dataset endpoint name while still refusing to silently guess when the schema changes materially.
+
+## Bidder search strategy
+
+The approved bidder database controls scope. The adapter searches only:
 
 - `contractor_name`
-- `related_companies`
-- primary and additional address/city/state/ZIP fields
-- `prevailing_wage_violations`
-- `dwd`
-- `dwd_substance_abuse_plan`
-- `mndol_ineligibility`
-- `misc_violations`
-- `osha`
+- explicitly stored `related_companies`
 
-The current source-to-field map intentionally gives `dol_enforcement` **no owned fields yet**. That is correct and should remain in place until the firm's field semantics are confirmed.
+It builds a bounded set of raw and normalized company-name variants. It refuses to issue very short generic one-word searches. For each variant it builds a DOL `filter_object` using the available employer-name fields and, when supported by the dataset and master record, the bidder state.
 
-### Strongest candidate mapping
+All returned records are deduplicated by the DOL case identifier when available. Pagination continues with `limit` and `offset` until the API-reported total is satisfied or the safety limit is reached.
 
-`prevailing_wage_violations` is the clearest potential master-field target.
+## Identity matching
 
-For a construction-focused bidder database, a confirmed WHD case with a DBRA violation is the most direct federal prevailing-wage signal. WHD also tracks other government-contract statutes such as SCA and CWHSSA, but they should not automatically be treated as equivalent to the firm's `prevailing_wage_violations` field until the firm confirms its intended definition.
+The adapter uses the project's shared company matching functions and master address data. Auto-confirmation is intentionally conservative.
 
-Recommended conservative rule during implementation:
+Strong automatic confirmation generally requires an exact or very high employer-name match plus meaningful location corroboration such as matching ZIP, address, or city+state. Plausible records without sufficient location support return `AMBIGUOUS_MATCH` and require review.
 
-- Collect all WHD law-specific findings as evidence.
-- Treat confirmed DBRA violations as a **candidate** for `prevailing_wage_violations = Y`.
-- Keep SCA, CWHSSA, FLSA, child-labor, FMLA, H-1B/H-2A/H-2B, MSPA, and other findings as evidence until explicit field ownership is approved.
-- Do not automatically write to `misc_violations` merely because a DOL case exists.
-- Do not map federal DOL results into `dwd` or `dwd_substance_abuse_plan`; those names refer to a different workflow/source and must not be conflated with federal DOL enforcement.
-- Do not map DOL OSHA records through this source because OSHA already has its own adapter.
-- Do not map federal DOL records into `mndol_ineligibility`.
+A source match is never inferred merely because the API returned a similar company name.
 
-## Recommended acquisition design
+## Comparison to the bidder database
 
-### API configuration
+The existing bidder schema includes `prevailing_wage_violations`, `dwd`, `dwd_substance_abuse_plan`, `mndol_ineligibility`, and `misc_violations` among other fields.
 
-Use a configuration value such as:
+`dol_enforcement` intentionally owns **no master fields yet** in `field_mappings.py`.
 
-`DOL_API_KEY`
+The strongest candidate mapping identified during research is:
 
-The key must never be committed to Git, written into audit logs, persisted in evidence, included in user-visible error messages, or stored in a raw request URL retained by the application.
+- confirmed Davis-Bacon and Related Acts (DBRA) violations -> candidate evidence for `prevailing_wage_violations = Y`
 
-The official API guide shows the key as the `X-API-KEY` request parameter. Because that can place the credential in a URL, the adapter must aggressively redact it from logging and provenance. Evidence should retain only the safe API endpoint/dataset identity and the non-secret search parameters.
+The adapter currently creates that evidence record when a confirmed bidder match has a positive DBRA violation count, but the common proposal service will not create a master change because `dol_enforcement` has no field ownership. This is deliberate until the firm confirms the exact meaning of `prevailing_wage_violations`.
 
-If no key is configured:
+Other WHD findings remain in the normalized evidence payload and are not automatically mapped to `misc_violations`, `dwd`, `dwd_substance_abuse_plan`, or `mndol_ineligibility`.
 
-- return `AUTH_REQUIRED`
-- set completeness to `UNKNOWN` or `NOT_APPLICABLE`
-- explain that DOL API credentials are missing
-- do not manufacture a clean negative
+## Result semantics
 
-### Dataset discovery and schema validation
+- Missing/invalid credentials -> `AUTH_REQUIRED`
+- Rate limit -> `BLOCKED`
+- DOL outage -> `SOURCE_UNAVAILABLE`
+- Unexpected catalog/schema -> `LAYOUT_CHANGED` or `DATASET_MALFORMED`
+- Fully completed search with no plausible employer -> `SUCCESS_NO_MATCH`
+- Plausible but unconfirmed employer -> `AMBIGUOUS_MATCH`
+- Confirmed employer with violation findings -> `SUCCESS_WITH_FINDINGS`
+- Confirmed employer with compliance records but no positive violation count -> `SUCCESS_COMPLETE`
+- Safety-limit/pagination truncation -> `PARTIAL_RESULTS`
 
-During `prepare()` or health check:
+A failed, blocked, ambiguous, unauthorized, or partial result is never treated as a clean negative.
 
-1. Query the keyless `/v4/datasets` catalog.
-2. Confirm that the expected WHD enforcement dataset is still published.
-3. Record catalog metadata/freshness when available.
-4. With an API key, query the dataset metadata endpoint before relying on the parser.
-5. Verify the required identity and enforcement fields exist.
-6. If required fields have disappeared or changed type/name, return a visible dataset/schema failure rather than silently dropping information.
+## Merge gate
 
-Do not hard-code assumptions from the retired site without validating the live v4 metadata.
+The adapter is registered on `feature/dol-enforcement-api`, but the source-picker entry intentionally remains `not_implemented` until live operator verification is completed with a real DOL API key. Before merging/marking ready:
 
-### Contractor search strategy
-
-The approved master database controls scope.
-
-For each bidder:
-
-1. Build approved search names from `contractor_name` plus explicitly stored `related_companies`.
-2. Preserve the raw legal names for server-side searching; also build controlled variants for punctuation and legal-suffix differences.
-3. Query employer-name fields in WHD (legal/trade name) and constrain by bidder state when practical.
-4. Prefer one API request containing an `OR` across approved names/trade-name conditions plus an `AND` state condition, rather than blindly issuing many broad calls.
-5. If the strict pass returns nothing, allow one bounded relaxed-name pass only for meaningful multi-token names; never search generic words such as `CONSTRUCTION`, `ELECTRIC`, `SERVICES`, or `BUILDERS` by themselves.
-6. Fully paginate all returned candidates before classifying the search as complete.
-7. Perform final entity matching locally using the existing contractor-name/address matching utilities.
-
-### Identity confirmation
-
-Useful WHD identity fields include employer legal/trade name and employer street/city/state/ZIP information. The adapter should compare those against both primary and additional master addresses.
-
-Recommended rules:
-
-- exact approved name/alias + meaningful ZIP/address corroboration: eligible for automatic identity confirmation
-- exact name + matching city/state but incomplete address: strong candidate, depending on uniqueness
-- fuzzy/near-exact name: human review unless additional evidence is exceptionally strong
-- generic-name overlap only: reject or require review
-- conflicting state/ZIP: never auto-confirm
-- multiple plausible entities: `AMBIGUOUS_MATCH`
-
-Existing remembered SAME_ENTITY / DIFFERENT_ENTITY judgments should be reused if the DOL record has a stable record/case identity suitable for that mechanism.
-
-## Evidence model
-
-For every confirmed or review-worthy WHD case, preserve as much of the following as the live schema provides:
-
-- DOL agency: WHD
-- dataset identifier/version or catalog metadata
-- source case ID
-- legal employer name
-- trade name
-- street address
-- city/state/ZIP
-- NAICS code/description
-- findings start/end dates
-- total violation count
-- employees affected/in violation
-- total back wages agreed to pay
-- civil money penalty information
-- law-specific violation counts
-- law-specific back wages/penalties where available
-- repeat/willful indicators where available
-- contractor/alias searched
-- identity match score/reasons
-- retrieval timestamp
-- safe dataset/API URL with credentials stripped
-- adapter/parser versions
-- pagination/completeness state
-
-Do not collapse several enforcement cases into a single undocumented `Y`. The review UI should be able to show the individual cases that support any proposed master-field change.
-
-## Comparison behavior
-
-### Confirmed positive
-
-If a WHD case is confidently matched to a bidder and contains relevant violations:
-
-- store the complete case evidence
-- aggregate a bidder-level summary only as a convenience; never discard the case-level records
-- if field semantics have been approved, create a proposed change separately from the evidence
-- never update the master automatically
-
-For `prevailing_wage_violations`, the safest initial proposal rule is a confirmed DBRA violation count greater than zero **after** the firm confirms that this field is intended to represent federal DBRA findings.
-
-### No matching record
-
-A completed search with zero plausible records may be classified `SUCCESS_NO_MATCH`, but it should not automatically propose `prevailing_wage_violations = N`.
-
-Reasons:
-
-- an employer may appear under an unrecorded legal/trade name
-- the public dataset includes concluded actions, not every open investigation
-- absence of a public enforcement record is not equivalent to proof that no violation ever occurred
-
-### Partial/failure cases
-
-The adapter must never convert these into a negative:
-
-- missing API key
-- 401/403 authentication failure
-- 429/rate limit
-- timeout/network failure
-- dataset unavailable
-- schema/metadata mismatch
-- incomplete pagination
-- malformed response
-- ambiguous company identity
-- stale/unknown dataset freshness where completeness cannot be established
-
-Use the project's existing explicit result states such as `AUTH_REQUIRED`, `HTTP_ERROR`, `TIMEOUT`, `PARTIAL_RESULTS`, `PAGINATION_INCOMPLETE`, `DATASET_MALFORMED`, or `AMBIGUOUS_MATCH`.
-
-## API versus bulk download
-
-### Preferred: targeted v4 API
-
-Use the API first for this desktop workflow because the application researches only approved bidders and their aliases. It minimizes transfer, allows targeted filtering, is easier to re-run, and gives cleaner failure/pagination semantics.
-
-### Optional future fallback: official bulk dataset
-
-The portal may expose complete downloadable datasets. A bulk-cache mode can be useful later if API-key management or rate limits become operationally painful, but it should not be the first implementation because the entire national dataset is substantially larger than the tiny subset needed for bidder comparison.
-
-If a bulk mode is added later, it should follow the SAM pattern: download/load once, hash the artifact, index approved bidder names locally, record dataset freshness, and search the local cache. Do not redownload a full national file once per bidder.
-
-## Other DOL agencies
-
-The old Enforcement Database included WHD, EBSA, MSHA, OFCCP, and OSHA.
-
-Recommended phased approach:
-
-### Phase 1 — WHD
-
-Implement and validate WHD employer compliance actions first. This is the closest fit to contractor labor/prevailing-wage research and the current bidder schema.
-
-### Phase 2 — OFCCP evidence
-
-OFCCP publishes federal-contractor compliance evaluations and complaint-investigation data. Add it as evidence-only unless the firm identifies a specific master field it owns.
-
-### Phase 3 — EBSA / MSHA if the firm actually uses them
-
-Do not add complexity merely because the old DOL portal exposed these agencies. Confirm that paralegals use those records for bidder review before implementing them.
-
-### OSHA
-
-Do not duplicate OSHA through this adapter. The project already has a dedicated OSHA source with its own source-specific matching and evidence behavior.
-
-## Proposed implementation files
-
-When research is accepted, implementation should likely add:
-
-- `backend/app/research/sources/dol_enforcement.py`
-- `backend/tests/test_dol_enforcement.py`
-- `backend/tests/fixtures/dol_whd_*.json`
-- `dol_enforcement` registration in `backend/app/research/source_registry.py`
-- source catalog URL correction in `backend/app/sources.py`
-- UI/API-key diagnostic support if not already generic
-
-Keep `backend/app/research/field_mappings.py` evidence-only until the `prevailing_wage_violations` semantics are explicitly confirmed.
-
-## Test plan
-
-At minimum cover:
-
-1. exact legal-name + ZIP match with a confirmed violation
-2. trade-name / related-company alias match
-3. same-name company in a different state
-4. generic/common-word false positive
-5. multiple plausible DOL employers -> manual review
-6. multiple WHD cases for one confirmed bidder
-7. confirmed DBRA violation evidence
-8. FLSA-only case that must **not** automatically become a prevailing-wage proposal
-9. zero-result complete query
-10. missing API key -> `AUTH_REQUIRED`
-11. 401/403 auth failure
-12. 429/retry exhaustion
-13. timeout
-14. malformed/schema-changed response
-15. pagination across multiple result pages
-16. incomplete pagination -> never clean negative
-17. API key is absent from stored URLs/logging/evidence
-18. existing master value is never overwritten without Review approval
-
-## Open decisions before automatic field proposals
-
-The implementation can collect WHD evidence without answering these questions, but automatic proposals should wait for the firm to confirm:
-
-1. Does `prevailing_wage_violations` mean federal DBRA only?
-2. Should SCA also count as a prevailing-wage violation for this database?
-3. Should CWHSSA or Public Contracts Act findings be included in that field or remain `misc_violations`/evidence only?
-4. Is the field intended to represent historical existence of any violation, or only a current/recent period?
-5. Does a prior resolved case remain `Y` permanently?
-
-Until those meanings are confirmed, DOL enforcement should collect and display evidence without owning a master field.
-
-## Sources researched
-
-Authoritative/current:
-
-- DOL Open Data Portal: `https://data.dol.gov/`
-- DOL v4 dataset catalog: `https://apiprod.dol.gov/v4/datasets`
-- DOL API User Guide: `https://www.dataportal.dol.gov/pdf/dol-api-user-guide.pdf`
-- DOL February 18, 2026 Open Data Portal announcement: `https://www.dol.gov/newsroom/releases/oasam/oasam20260218`
-- WHD compliance-action dataset metadata on Data.gov: `https://catalog.data.gov/dataset/wage-and-hour-division-compliance-action-data`
-- WHD Additional Resources / Enforcement Database description: `https://www.dol.gov/agencies/whd/data/charts/additional-resources`
-- WHD government-contract enforcement statistics: `https://www.dol.gov/agencies/whd/data/charts/government-contracts`
-- OFCCP compliance-evaluation and complaint-investigation data: `https://www.dol.gov/agencies/ofccp/foia/library/Compliance-Evaluations-and-Complaint-Investigations`
-
-Historical schema cross-check only:
-
-- Archived official DOL Developer WHD Compliance documentation in `USDepartmentofLabor/Developer`. Live v4 metadata must be treated as source of truth during implementation.
+1. Run the complete backend test suite.
+2. Verify catalog discovery against the live v4 API.
+3. Verify metadata resolution against the live WHD dataset.
+4. Test at least one known positive bidder and one expected no-match bidder.
+5. Confirm the API key never appears in persisted evidence, logs, warnings, or UI-visible URLs.
+6. Confirm a complete no-match does not manufacture a bidder-field `N`.
+7. Confirm DBRA evidence does not create a proposed master change while field ownership remains disabled.
+8. Only then change the picker status to `ready` and merge the PR into `main`.
