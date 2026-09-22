@@ -1,0 +1,5 @@
+Classification,Name,Prefix,First,Middle,Last,Suffix,Address 1,Address 2,Address 3,Address 4,City,State / Province,Country,Zip Code,D&B Open Data Flag,Unique Entity Identifier (DUNS),Unique Entity Identifier (SAM),Exclusion Program,Excluding Agency,CT Code,Exclusion Type,Additional Comments,Active Date,Termination Date,Record Status,Cross-Reference,SAM Number,CAGE,NPI,Creation Date
+Firm,"ACME ELECTRIC, L.L.C.",,,,,,123 MAIN STREET,,,,MADISON,WI,USA,53703,,123456789,ACMEUEI12345,Reciprocal,GSA,,Ineligible (Proceedings Completed),,01/15/2026,Indefinite,,ACME ELECTRIC LLC,100000001,1A2B3,,01/10/2026
+Firm,COMMON BUILDERS LLC,,,,,,100 OAK ROAD,,,,MADISON,WI,USA,53704,,111111111,COMMONUEI001,Reciprocal,DOL,,Ineligible (Proceedings Completed),,02/01/2026,Indefinite,,,100000002,2B3C4,,01/25/2026
+Firm,COMMON BUILDERS LLC,,,,,,200 PINE ROAD,,,,MADISON,WI,USA,53705,,222222222,COMMONUEI002,Reciprocal,GSA,,Prohibition/Restriction,,03/01/2026,Indefinite,,,100000003,3C4D5,,02/25/2026
+Individual,,MR,JOHN,,DOE,,,,,,MADISON,WI,USA,53703,,,,Reciprocal,HHS,,Ineligible (Proceedings Completed),,01/01/2026,Indefinite,,,100000004,,1234567890,12/20/2025

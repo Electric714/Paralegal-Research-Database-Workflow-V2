@@ -14,6 +14,7 @@ backend/data/imports/*
 !backend/data/imports/.gitkeep
 backend/data/evidence/*
 !backend/data/evidence/.gitkeep
+backend/data/source_cache/*
 
 # Node / Vite
 frontend/node_modules/
