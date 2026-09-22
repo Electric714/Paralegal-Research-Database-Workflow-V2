@@ -1,287 +1,190 @@
-# Violation Tracker Integration Research
+# Violation Tracker Integration
 
-**Branch:** `feature/violation-tracker-public-search`  
-**Status:** Research/design complete; production adapter not yet implemented  
+**Status:** Production adapter implemented and registered  
+**Acquisition:** Free public website only  
 **Target source:** https://violationtracker.goodjobsfirst.org/  
-**Research date:** 2026-09-21
+**Reviewed:** 2026-09-21
 
-## What the name means
+## Role in V2
 
-**Violation Tracker is not an acronym.** It is the product/database name. It is produced by the Corporate Research Project of Good Jobs First.
+Violation Tracker is the name of Good Jobs First's cross-agency enforcement database; it is not an acronym.
 
-The U.S. Violation Tracker combines enforcement and litigation information concerning corporate misconduct. Its current public site says it contains more than 700,000 civil and criminal cases from more than 450 agencies, with cases going back to 2000 and selected private litigation also included.
+V2 uses it as a **cross-agency evidence and discrepancy source**. It can surface workplace-safety, environmental, wage-and-hour, contracting, consumer-protection, discrimination, litigation, and other enforcement records that may overlap with the project's dedicated OSHA, environmental, labor, court, and debarment sources.
 
-## Why this source is useful to our project
+That overlap is intentional, but Violation Tracker is **evidence-only** in this project. `backend/app/research/field_mappings.py` gives `violation_tracker` an empty `owned_fields` set. Findings may be stored and compared, but they cannot directly create master-field proposals.
 
-Violation Tracker is unusually valuable as a **cross-agency enforcement index**. Instead of answering only one narrow question, it can surface records involving workplace safety, environmental enforcement, wage and hour violations, government contracting, consumer protection, discrimination, False Claims Act matters, antitrust, financial regulation, bribery, and selected litigation.
+## Implemented free public-search method
 
-That breadth also creates the main integration risk: Violation Tracker often republishes or standardizes information originating from sources that this project researches separately, including OSHA, EPA/ECHO, Department of Labor data, courts/PACER, state agencies, and other enforcement bodies. It also warns that duplicate or partially duplicate penalty entries can exist and that its own company-level totals are adjusted to reduce double counting.
+The registered adapter is:
 
-For that reason, Violation Tracker should initially be treated as a **research evidence and discrepancy-detection source**, not as an automatic replacement for the authoritative source adapters already assigned to specific bidder fields.
+`backend/app/research/sources/violation_tracker.py`
 
-## Current V2 repository fit
+The current public site supports an exact **Company or Current Parent** query with:
 
-The current repository already has the correct safety posture for this source. `backend/app/research/field_mappings.py` defines `violation_tracker` with an empty `owned_fields` set and states that field ownership must be confirmed before automatic proposals are allowed.
+`GET /summary?company_op=%3D&company=<approved name>`
 
-That should remain unchanged for the first implementation.
+A live review on 2026-09-21 confirmed that this route applies the filter and returns the normal Violation Tracker result table. Pagination links currently continue on the site root while preserving the same `company_op`, `company`, and `page` parameters. The adapter therefore accepts both `/summary` and `/` result paths, but only on the expected HTTPS host and only when the exact company filter is preserved.
 
-The current bidder schema contains fields that can be compared against Violation Tracker evidence, including:
+The earlier research note about relying on the Advanced Search POST form is superseded by the verified public summary-query route used by the production adapter.
 
-- `osha`
-- `osha_severe_violations`
-- `years`
-- `state_federal_debarment`
-- `federal_court`
-- `circuit_court`
-- `environmental_violations`
-- `prevailing_wage_violations`
-- `better_business_bureau_complaints`
-- `misc_violations`
-- `tax_liability`
+No paid subscription, paid download, API key, subscriber export, or full-dataset access is required or used.
 
-However, comparison does **not** mean Violation Tracker should own those fields. Existing dedicated authoritative sources should continue to own their assigned fields.
+## Approved names and aliases
 
-## Data access research
+For each bidder already in the master database, the adapter searches:
 
-### Public access
+1. `contractor_name`
+2. every approved alias/DBA already stored in `related_companies`
 
-The site publicly supports basic search, summary pages, advanced search, and individual violation-record pages. Public search results expose useful columns including company, current parent, parent industry, primary offense type, year, agency, and penalty amount. Individual records can contain much richer data, including company name, current parent, penalty/date, offense group/type, agency, action type, civil/criminal status, case identifiers, facility address information, NAICS information, source links, and links back to originating agency records.
+Aliases are split only on semicolons, pipes, and newlines. Commas are deliberately not treated as alias separators because they commonly occur inside legal company names.
 
-The site documentation describes five company-name matching modes in Advanced Search: starts with, exact/equal, contains any word, contains all words, and ends with.
+Each approved name is searched separately and all outcomes are aggregated into one `SourceResult`.
 
-The live Advanced Search form currently submits to `/search.php` using POST. This is important: implementation should inspect and submit the site's real form parameters rather than guessing GET parameters. A research probe that guessed an unsupported GET operator produced an unfiltered result set, demonstrating that a parser must fail closed if the site ignores or changes search parameters.
+## Result semantics
 
-### Downloads and subscription
+The adapter follows the existing V2 source-result model.
 
-Searching and displaying results are free. Spreadsheet downloads are subscriber-only. Current published tiers allow up to 1,000, 5,000, or 10,000 downloaded records per search depending on plan.
+### Match
 
-The site also states that people needing a full dataset with corporate identifiers for academic purposes can contact Good Jobs First.
+`SUCCESS_WITH_FINDINGS` is returned when a result row's penalized-company name matches the approved searched name after conservative normalization. Legal suffix normalization is allowed; internal token boundaries are preserved.
 
-No documented public API was found in the official user guide, quick-start material, subscription page, or site search reviewed for this research. The documented access methods are the site search/summary interfaces and subscriber downloads.
+Direct findings are retained as `EvidenceRecord` objects with `field_name="violation_tracker"`. Because Violation Tracker owns no master fields, those evidence records cannot create automatic master changes.
 
-### Terms and automation constraint
+### No match
 
-Good Jobs First's Terms of Service grant access for internal use subject to the Terms and posted data limits. Their acceptable-use section specifically prohibits automated activity that intentionally imposes unreasonable burdens on the service or circumvents technological blockers.
+`SUCCESS_NO_MATCH` with `CompletenessStatus.COMPLETE` is returned only when **every approved-name search completes successfully** and no qualifying records remain.
 
-Therefore this project must **not** use aggressive crawling, scrape the complete site, evade blocks, bypass authentication/subscriber controls, or attempt to retrieve subscriber-only downloads without authorization.
+An empty result is a valid successful lookup. It is not a failure merely because there is no new information.
 
-A production adapter should use a conservative request rate, caching, retries/backoff, an identifiable user agent, no authentication bypass, and no CAPTCHA/blocker circumvention. If the site blocks automated requests, the result must become `blocked`/`partial` rather than triggering bypass logic.
+### Ambiguous
 
-## Recommended integration strategy
+The public exact query searches both Company and Current Parent. A row that matches only the current-parent field is therefore treated as an identity-review candidate, not as proof that the bidder itself committed the violation.
 
-### Recommended Phase 1: targeted public lookup adapter
+If only parent-level candidates exist, the adapter returns `AMBIGUOUS_MATCH`. If direct findings and parent-only candidates both exist, the direct findings remain confirmed evidence and the parent-only rows are retained separately for review with an explicit warning.
 
-For each contractor already present in the approved master database, perform only the minimum public search needed for that contractor. Search the approved contractor name and, when available, approved `related_companies` aliases. Do not discover and auto-add unrelated companies.
+### Partial or failed
 
-The adapter should parse the candidate result rows and then open individual Violation Tracker records only for candidate matches that need identity verification or additional evidence.
+A blocked, changed, incomplete, or unverifiable query never becomes a clean negative. Depending on what completed successfully, the adapter returns an appropriate failure status or `PARTIAL_RESULTS`.
 
-This keeps request volume proportional to the master database rather than the size of Violation Tracker and aligns with the project's rule that the master list controls research scope.
+## Fail-closed validation
 
-## Contractor identity matching
+Before accepting a page, the adapter verifies that:
 
-Violation Tracker's own parent-company system is useful but cannot be treated as proof that a violation belongs to the exact bidder in our master database. Violation Tracker primarily links records to the company's **current parent**, even when ownership differed when the penalty occurred. Historical-parent data is partly subscriber-only.
+- the final URL uses HTTPS
+- the hostname is `violationtracker.goodjobsfirst.org`
+- the path is the expected `/summary` or `/` results path
+- `company_op` remains exactly `=`
+- `company` remains exactly the approved searched name
+- the expected result table or explicit no-results marker is present
+- the reported total result count is present for positive searches
+- table rows do not exceed the reported total
+- each returned row matches either the searched penalized company or the searched current parent
+- pagination preserves the same exact query
+- all reported records are accounted for by **unique source-record IDs**, not merely by raw row count
 
-Recommended matching hierarchy:
+The last rule prevents a repeated or duplicated pagination page from falsely satisfying the reported result count.
 
-1. **Strongest:** exact normalized penalized-company name plus matching facility location/address information when present.
-2. **Strong:** exact normalized master contractor name matching the penalized company name.
-3. **Strong but separately labeled:** an approved `related_companies` alias matching the penalized company.
-4. **Corroborating:** facility city/state/ZIP or address agrees with the master record.
-5. **Supporting only:** current-parent relationship agrees with known company information.
-6. **Ambiguous:** only a parent name matches, a generic company name matches, or address/location information conflicts or is absent where needed to distinguish entities.
+If any of those invariants fail, the adapter rejects the response rather than treating it as a negative.
 
-The adapter must preserve which name caused the match: master legal name, related-company alias, or parent-company relationship.
+## Identity normalization
 
-A parent-only match should never automatically become a positive exact-bidder finding.
+Identity matching is deliberately conservative. It uses the project's standard text normalization plus common corporate-suffix normalization.
 
-## Required result states
+It does **not** remove every internal space. Collapsing `"AB Construction"` and `"A B Construction"` into the same spaceless token can merge genuinely different legal names, so token boundaries are preserved.
 
-For each contractor lookup, search the master legal name plus every approved alias/DBA in `related_companies` and aggregate the searches into one source result.
+Fuzzy matching is not used to establish confirmed Violation Tracker identity.
 
-The user-facing logic should map to four simple states:
+## Pagination and record identity
 
-- **MATCH** — one or more records can be tied confidently to the contractor or an approved alias.
-- **NO MATCH** — every approved-name search demonstrably ran correctly and produced no qualifying records. This is a successful lookup, not a failure.
-- **AMBIGUOUS** — candidate records exist but identity cannot be established safely, including parent-only or conflicting-location cases.
-- **FAILED/PARTIAL** — the website blocked the request, changed layout, ignored the submitted filter, pagination could not be completed, or one or more approved-name searches could not be proven complete.
+The public search can return multiple pages. The adapter follows only same-host pagination URLs that preserve the exact approved-name filter and stops at the configured safety cap.
 
-This is critical: a legitimate empty search result must be classified as `SUCCESS_NO_MATCH` with `CompletenessStatus.COMPLETE`; it must never be treated as a source failure merely because there is no new information.
+Completeness is measured with unique Violation Tracker record IDs. The preferred record ID comes from the canonical individual-record URL slug. When no canonical detail URL is available, a deterministic fingerprint is used as a fallback.
 
-## Normalization rules
+If the site reports more records than can be uniquely verified within the available pagination links or safety cap, the outcome becomes `PAGINATION_INCOMPLETE` and the bidder-level result remains partial rather than clean.
 
-Use conservative normalization for candidate generation only: Unicode normalization, lowercase/casefold, punctuation and repeated-whitespace normalization, and optional comparison with common legal suffixes such as LLC, Inc., Corporation, Co., LLP, and LP removed.
+## Parent-only records
 
-Never let normalization silently collapse genuinely different businesses. If removing suffixes or punctuation creates multiple plausible candidates, classify the lookup as ambiguous and preserve all candidates for human review.
+Violation Tracker's exact query can return subsidiaries because the searched company is their current parent. The adapter keeps this distinction explicit:
 
-Do not perform fuzzy matching aggressively. If fuzzy matching is added later, use it only to generate review candidates, never to establish a clean positive automatically.
+- `penalized_company` = direct approved-name finding
+- `current_parent_only` = identity-review candidate
 
-## Evidence fields to capture
+Parent-only rows are never silently promoted into direct bidder violations. They are stored separately in `normalized_payload["parent_only_records"]`, and a parent-only evidence summary is retained even when direct findings are present in the same search.
 
-For every matched or ambiguous Violation Tracker record, preserve as much of the following as the public page exposes:
+## Evidence retained
 
-- canonical Violation Tracker record URL
-- company name as reported by the source
-- current parent company
-- parent-at-penalty-time when legitimately available
-- penalty amount
-- year and exact date when available
-- offense group
-- primary offense type
-- secondary offense type when available
-- violation description
-- level of government
-- action type
+For result rows the adapter currently retains:
+
+- stable source record ID
+- company
+- current parent
+- current parent industry
+- primary offense
+- year
 - agency
-- court when present
-- civil/criminal classification
-- case ID and case name when present
-- facility state/county/city/address/ZIP
-- facility NAICS
-- source-of-data URL
-- archived-source URL when present
-- direct OSHA/ECHO/PACER link when present
-- duplicate-penalty marker when exposed by the site
-- retrieval timestamp
-- parser/adapter version
-- identity-match method and confidence/explanation
+- displayed penalty text
+- parsed penalty amount
+- duplicate-penalty marker
+- canonical detail URL when present
+- current-parent URL when present
+- approved query name and whether it came from the master name or an approved alias
+- match basis
+- per-query pagination/request diagnostics
+- reported result count
+- source data-version marker when exposed
+- adapter/parser versions
 
-The canonical Violation Tracker record URL should be the preferred source-record identifier. If a canonical record identifier cannot be obtained, use a deterministic fallback fingerprint from stable record properties rather than row position.
-
-## Comparison behavior against the master database
-
-The first implementation should compare Violation Tracker evidence to existing master fields but **must not automatically overwrite them**.
-
-Recommended comparison examples:
-
-- Workplace-safety record found while master `osha` is blank or negative -> discrepancy/research flag; verify through the dedicated OSHA source.
-- Environmental offense found while `environmental_violations` is blank or negative -> discrepancy/research flag; verify through the applicable authoritative environmental source.
-- Wage-and-hour offense found while `prevailing_wage_violations` is blank or negative -> related evidence, but do not equate all wage-and-hour cases with a prevailing-wage violation; send to review/authoritative verification.
-- Federal private-litigation/court record found while `federal_court` is blank -> court-evidence lead; PACER remains the dedicated court source.
-- A category that does not fit any dedicated master field -> candidate for `misc_violations`, but only after the firm confirms the intended business meaning of that field.
-
-This preserves the project's core distinction between **evidence discovered** and **master truth approved by a human**.
-
-## Proposed result model for the UI
-
-A Violation Tracker source result should show a compact bidder-level summary such as:
-
-`3 matched records | $128,500 penalties | latest: 2024 | workplace safety (2), environmental (1)`
-
-Under that summary, show individual records and a comparison state for each relevant master category:
-
-- `Already represented in master`
-- `Potential new discrepancy`
-- `Needs identity review`
-- `Needs authoritative-source verification`
-
-Do not reduce the source to a single Yes/No because that would discard most of the useful evidence and create confusion when several categories are involved.
+The source remains evidence-only, so these records support review and discrepancy detection without silently changing the approved bidder database.
 
 ## Duplicate handling
 
-Violation Tracker explicitly documents duplicate and partially duplicate penalty records. In addition, the same underlying case may also be found independently by this project's OSHA, environmental, DOL, PACER, or other adapters.
+Violation Tracker marks some penalty entries as duplicates or multi-agency announcements. The parser preserves that marker.
 
-Keep source records individually for provenance, but create a cross-source deduplication/reconciliation layer for display and summary purposes.
+The adapter also deduplicates pagination by stable source record ID before deciding a result set is complete. It does not sum penalties into a master field.
 
-Preferred within-Violation-Tracker key: canonical individual-record URL.
+Cross-source reconciliation with OSHA, environmental, labor, or court findings remains a separate concern; overlapping source records should retain their own provenance.
 
-Fallback fingerprint: normalized company + agency + case ID when present + date/year + primary offense type + penalty amount.
+## Blocking and site changes
 
-Never sum penalties blindly when the site marks a record as duplicative or when multiple source records appear to describe the same case.
+The adapter does not bypass CAPTCHA, authentication, subscriber controls, anti-bot challenges, or rate limits.
 
-## Completeness and failure classification
+HTTP 403/429 responses and recognizable interactive challenge pages become `BLOCKED`. Server errors, timeouts, layout changes, result-count inconsistencies, ignored filters, and incomplete pagination remain explicit non-clean states.
 
-A clean negative is allowed only when the adapter can demonstrate that the intended contractor query completed successfully and all returned result pages relevant to that query were evaluated.
+## Request discipline
 
-Return `partial`, `ambiguous`, `blocked`, or `failed` rather than `no_match` when any of the following occurs:
+Research is contractor-scoped rather than site-wide. The adapter never crawls the full Violation Tracker database and never discovers unrelated contractors for insertion into the master database.
 
-- the site ignores submitted filters
-- the result set exceeds the adapter's safe traversal limit
-- pagination cannot be completed
-- a page structure/parser signature changes
-- the source rate-limits or blocks requests
-- a CAPTCHA/authentication wall appears
-- multiple entities cannot be resolved confidently
-- subscriber-only information would be required to resolve identity
+`MAX_PAGES_PER_NAME` provides a hard pagination safety cap. If a very large exact/current-parent query cannot be completely traversed within that cap, the result fails closed as incomplete.
 
-This follows the existing V2 rule that partial or failed research cannot be converted into a false negative.
+## Tests
 
-## Caching and refresh cadence
+Offline tests cover:
 
-Violation Tracker currently publishes updates approximately monthly; its 2026 update log shows updates in March, April, May, June, July, and August. The site's visualization documentation also describes monthly updating.
+- parsing the public result table
+- clean no-match across the master name and approved aliases
+- direct approved-alias match
+- parent-only ambiguity
+- unrelated rows / ignored-filter protection
+- one successful name plus one failed alias -> partial
+- rate limiting and anti-bot challenge handling
+- pagination before declaring completeness
+- evidence-only field ownership
+- internal-whitespace identity collisions
+- repeated pagination rows not faking completeness
 
-Accordingly, there is no reason to hammer the source hourly. Cache successful contractor searches and source records. A conservative default would be to reuse cached results during the same research run and allow scheduled refresh no more frequently than the source's meaningful update cadence unless a user explicitly requests a fresh lookup.
+Normal CI uses mocked HTML/HTTP responses and does not hit the live site.
 
-The adapter should store the source's visible update date/version when available so future runs can avoid refetching unchanged data.
+## Current limitations and future improvements
 
-## Health check and parser hardening
+The adapter currently works from the public result table rather than fetching every individual detail page. That keeps request volume low and is sufficient for the current evidence-only workflow, but individual detail-page enrichment could later add facility address, case identifiers, action type, detailed descriptions, and originating-source links when those fields are needed for human review.
 
-The adapter health check should verify only lightweight public invariants, for example:
+Caching across separate research runs could also reduce repeated requests. Any future cache must preserve source version/time and must never turn stale or incomplete data into a clean negative.
 
-- homepage/search endpoint reachable
-- expected search-form controls still present
-- result table headers/signature still recognizable
-- individual-record page still exposes expected label/value structure
-
-Do not use a real contractor search as a high-frequency health check.
-
-Parsing should use labeled fields and URLs instead of fragile CSS positions wherever possible. Unknown/new fields should be retained in raw evidence rather than discarded.
-
-## Proposed source adapter structure
-
-Implementation should add a dedicated adapter under `backend/app/research/sources/violation_tracker.py` using the existing `ResearchSource` contract.
-
-Suggested internal separation:
-
-- HTTP/session client with throttling, retry/backoff and cache hooks
-- search-form/query builder
-- search-results parser
-- individual-record parser
-- identity matcher
-- duplicate/fingerprint helper
-- evidence-to-comparison classifier
-
-The adapter should return `SourceResult` evidence only. It should not update master bidder rows directly.
-
-## Proposed tests before enabling the source
-
-Use fixture HTML, not the live website, for normal automated tests. Cover:
-
-- exact company with zero results
-- exact company with one result
-- company with several results
-- alias/related-company match
-- parent-only match classified as ambiguous/review
-- same name but conflicting state/address
-- missing facility address
-- duplicate penalty marker
-- multi-page results
-- malformed/changed result page
-- filter silently ignored and unfiltered results returned
-- rate-limit/block response
-- subscriber-only field absent
-- individual record missing optional fields
-- cross-source overlap with an OSHA/environmental/court result
-
-A small manually invoked smoke test can validate the live public form, but it should not run automatically in CI.
-
-## Implementation decision
-
-**Recommended:** implement Violation Tracker as a low-volume, contractor-scoped evidence adapter with strong caching and fail-closed completeness rules. Keep `owned_fields` empty at first. Use its findings to reveal discrepancies and to point the user toward the dedicated authoritative source that should confirm a master-field change.
-
-**Do not implement:** full-site crawling, blocker/CAPTCHA bypass, subscriber-download bypass, mass harvesting unrelated to the approved master database, or automatic overwrites of dedicated OSHA/environmental/wage/court fields.
-
-## Open decision before field proposals are enabled
-
-The only master field that may eventually make sense for direct Violation Tracker ownership is `misc_violations`, and even that should remain disabled until the firm defines exactly what `misc_violations` is intended to mean.
-
-If `misc_violations` means “other verified regulatory/enforcement misconduct not represented by a dedicated field,” then a narrow offense-type mapping can later be designed. If it means something else, Violation Tracker may remain evidence-only permanently.
-
-## Official sources reviewed
+## Official material reviewed
 
 - Violation Tracker homepage: https://violationtracker.goodjobsfirst.org/
 - User Guide: https://violationtracker.goodjobsfirst.org/pages/user-guide
 - Quick Start: https://violationtracker.goodjobsfirst.org/pages/quick-start
 - Data Sources: https://violationtracker.goodjobsfirst.org/pages/violation-tracker-data-sources
 - Update Log: https://violationtracker.goodjobsfirst.org/pages/update-log
-- Subscription Plans: https://violationtracker.goodjobsfirst.org/plans
 - Good Jobs First Terms of Service: https://goodjobsfirst.org/terms-of-service/
