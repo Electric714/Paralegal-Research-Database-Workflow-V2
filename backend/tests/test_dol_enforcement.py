@@ -100,11 +100,12 @@ def standard_handler(data_rows: list[dict], *, status: int = 200):
     return handler
 
 
-def test_dol_adapter_is_registered_but_picker_stays_not_ready_until_live_verified():
+def test_dol_adapter_is_registered_and_picker_is_ready_with_api_key_requirement():
     assert "dol_enforcement" in implemented_source_keys()
     item = next(source for source in SOURCES if source["key"] == "dol_enforcement")
     assert item["url"] == "https://data.dol.gov/"
-    assert item["status"] == "not_implemented"
+    assert item["status"] == "ready"
+    assert "DOL_API_KEY" in item["category"]
 
 
 def test_dol_field_ownership_remains_disabled_pending_firm_semantics():
@@ -199,7 +200,6 @@ def test_data_pagination_uses_limit_and_offset_until_reported_total_is_complete(
             calls.append(offset)
             row = whd_row(case_id=f"case-{offset}")
             if offset == 0:
-                # Force one more page by reporting more records than the first response contains.
                 return httpx.Response(200, json={"data": [row], "meta": {"total_count": 2}}, request=request)
             return httpx.Response(200, json={"data": [row], "meta": {"total_count": 2}}, request=request)
         return httpx.Response(404, request=request)
