@@ -337,14 +337,13 @@ def _approved_names(contractor: ContractorContext) -> list[tuple[str, str]]:
 
 
 def _identity_forms(value: str) -> set[str]:
-    text = normalize_text(value)
-    company = normalize_company_name(value)
-    forms = {text, company}
-    if text:
-        forms.add(text.replace(" ", ""))
-    if company:
-        forms.add(company.replace(" ", ""))
-    return {form for form in forms if form}
+    # Preserve token boundaries. Removing every internal space can collapse
+    # genuinely different legal names (for example, "AB" and "A B").
+    return {
+        form
+        for form in {normalize_text(value), normalize_company_name(value)}
+        if form
+    }
 
 
 def _same_identity(left: str, right: str) -> bool:
@@ -355,7 +354,8 @@ def _query_is_preserved(url: str, query_name: str) -> bool:
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
     return (
-        parsed.hostname == "violationtracker.goodjobsfirst.org"
+        parsed.scheme == "https"
+        and parsed.hostname == "violationtracker.goodjobsfirst.org"
         and parsed.path in {"/", "/summary"}
         and query.get("company_op") == ["="]
         and query.get("company") == [query_name]
@@ -412,8 +412,8 @@ def _row_payload(row: ViolationTrackerRow) -> dict:
 class ViolationTrackerSource(ResearchSource):
     source_key = "violation_tracker"
     display_name = "Violation Tracker"
-    adapter_version = "1.0.0"
-    parser_version = "1.0.0"
+    adapter_version = "1.0.1"
+    parser_version = "1.0.1"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
         self.client = client or httpx.Client(
@@ -516,11 +516,11 @@ class ViolationTrackerSource(ResearchSource):
         queued: set[str] = set()
         visited: set[str] = set()
         rows: list[ViolationTrackerRow] = []
+        seen_record_ids: set[str] = set()
         attempts: list[dict] = []
         reported_count: int | None = None
         data_version: str | None = None
         pages_fetched = 0
-        raw_rows_seen = 0
         had_valid_page = False
 
         while queue and pages_fetched < MAX_PAGES_PER_NAME:
@@ -600,6 +600,15 @@ class ViolationTrackerSource(ResearchSource):
                     warning="Violation Tracker's result count could not be verified.",
                     http_status=response.status_code,
                 )
+            if len(parsed.rows) > parsed.result_count:
+                return self._failed_outcome(
+                    query_name=query_name, query_basis=query_basis, rows=rows, attempts=attempts,
+                    pages_fetched=pages_fetched, had_valid_page=had_valid_page,
+                    reported_count=reported_count, data_version=data_version,
+                    status=SourceResultStatus.PARSER_FAILURE,
+                    warning="Violation Tracker returned more table rows than its reported result count.",
+                    http_status=response.status_code,
+                )
             if reported_count is None:
                 reported_count = parsed.result_count
             elif reported_count != parsed.result_count:
@@ -627,10 +636,14 @@ class ViolationTrackerSource(ResearchSource):
                     )
 
             had_valid_page = True
-            rows.extend(parsed.rows)
-            raw_rows_seen += len(parsed.rows)
+            for row in parsed.rows:
+                record_id = _record_id(row)
+                if record_id in seen_record_ids:
+                    continue
+                seen_record_ids.add(record_id)
+                rows.append(row)
             visited.add(final_url)
-            if raw_rows_seen >= reported_count:
+            if len(seen_record_ids) >= reported_count:
                 return NameSearchOutcome(
                     query_name=query_name, query_basis=query_basis, rows=tuple(rows),
                     attempts=tuple(attempts), complete=True, had_valid_page=True,
@@ -657,7 +670,7 @@ class ViolationTrackerSource(ResearchSource):
             status=SourceResultStatus.PAGINATION_INCOMPLETE,
             warning=(
                 f"Violation Tracker pagination for {query_name!r} was incomplete: "
-                f"{raw_rows_seen} of {reported_count or 'unknown'} reported rows were verified "
+                f"{len(seen_record_ids)} unique of {reported_count or 'unknown'} reported rows were verified "
                 f"within the {MAX_PAGES_PER_NAME}-page safety cap."
             ),
         )
@@ -773,7 +786,7 @@ class ViolationTrackerSource(ResearchSource):
                     },
                 )
             )
-        if not direct_records and parent_only_records:
+        if parent_only_records:
             first = parent_only_records[0]
             evidence.append(
                 EvidenceRecord(
@@ -839,9 +852,9 @@ class ViolationTrackerSource(ResearchSource):
             ),
         }
 
-        if status == SourceResultStatus.AMBIGUOUS_MATCH:
+        if parent_only_records:
             warnings.append(
-                "Violation Tracker returned records only through a current-parent relationship; they are not treated as bidder violations without human identity review."
+                "Violation Tracker also returned records through a current-parent relationship; those records are retained as review candidates and are not treated as bidder violations."
             )
         if status == SourceResultStatus.PARTIAL_RESULTS:
             warnings.append(
