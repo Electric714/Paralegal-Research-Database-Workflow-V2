@@ -78,6 +78,7 @@ def test_typo_name_requires_review():
 
 
 def test_legal_name_expansion_requires_review_instead_of_clean_negative():
+def test_similar_name_requires_review():
     body = CSV.replace("Acme Construction LLC", "Acme Construction Services LLC")
     result = source_for(body).search(contractor())
     assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
