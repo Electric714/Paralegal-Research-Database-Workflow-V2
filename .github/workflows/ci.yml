@@ -20,6 +20,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app
       - run: python -c "from app.main import app; print(app.title)"
+      - run: python -c "from app.main_with_wcca import app; print(app.title); assert any(getattr(r, 'path', '') == '/api/sources/wcca/status' for r in app.router.routes)"
       - run: pytest -q
 
   frontend:
@@ -45,7 +46,7 @@ jobs:
         shell: powershell
         run: |
           $failed = $false
-          foreach ($script in @('scripts/start.ps1', 'scripts/stop.ps1')) {
+          foreach ($script in @('scripts/start.ps1', 'scripts/stop.ps1', 'scripts/WCRB_PROBE.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$tokens, [ref]$errors) | Out-Null

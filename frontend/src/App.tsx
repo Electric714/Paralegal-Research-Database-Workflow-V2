@@ -45,6 +45,26 @@ type Run = {
   source_keys: string[];
   message?: string;
 };
+type RunSummaryCounts = { completed: number; no_match: number; ambiguous: number; partial: number; blocked: number; failed: number; not_checked: number };
+type RunSummarySource = RunSummaryCounts & { source_key: string; expected: number; change_count: number; retryable: number };
+type RunSummaryTask = {
+  task_id: number; source_key: string; status: string; summary_status: keyof RunSummaryCounts;
+  identity_status?: string | null; completeness_status?: string | null; identity_confidence?: number | null;
+  attempt_count: number; retryable: boolean;
+type RunSummarySource = RunSummaryCounts & { source_key: string; expected: number; change_count: number };
+type RunSummaryTask = {
+  task_id: number; source_key: string; status: string; summary_status: keyof RunSummaryCounts;
+  identity_status?: string | null; completeness_status?: string | null; identity_confidence?: number | null;
+  checked_at?: string | null; source_url?: string | null; source_record_id?: string | null; snapshot_id?: number | null;
+  changes: ReviewItem[];
+};
+type RunSummaryBidder = { bidder_id: number; external_id?: string | null; contractor_name: string; sources: RunSummaryTask[] };
+type RunSummary = {
+  run: Run; expected_tasks: number; persisted_tasks: number; accounted_tasks: number; safe_complete_tasks: number;
+  attention_tasks: number; retryable_task_count: number; counts: RunSummaryCounts; raw_status_counts: Record<string, number>; change_count: number;
+  attention_tasks: number; counts: RunSummaryCounts; raw_status_counts: Record<string, number>; change_count: number;
+  pending_change_count: number; integrity_ok: boolean; integrity_issues: string[]; sources: RunSummarySource[]; bidders: RunSummaryBidder[];
+};
 type DashboardData = {
   bidder_count: number;
   source_count: number;
@@ -106,10 +126,29 @@ type IdentityReviewItem = {
 type SamStatus = {
   source_key: string;
   implemented: boolean;
-  api_key_configured: boolean;
+  acquisition_mode?: string;
   cached_extract: string | null;
   cached_extract_date: string | null;
   cached_record_count: number;
+};
+type SamUploadResponse = {
+  item: {
+    filename: string;
+    csv_name?: string;
+    extract_date: string | null;
+    record_count: number;
+    sha256?: string;
+    acquisition_mode?: string;
+  };
+  comparison: null | {
+    run: Run;
+    executed: number;
+    skipped: number;
+    already_processed: number;
+    proposal_count: number;
+    status_counts: Record<string, number>;
+  };
+  message: string;
 };
 
 const API = import.meta.env.VITE_API_URL || "";
@@ -197,6 +236,7 @@ export default function App() {
   const [bidders, setBidders] = useState<Bidder[]>([]);
   const [bidderTotal, setBidderTotal] = useState(0);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
   const [identityReviewItems, setIdentityReviewItems] = useState<IdentityReviewItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
@@ -212,8 +252,10 @@ export default function App() {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [samStatus, setSamStatus] = useState<SamStatus | null>(null);
   const [samMessage, setSamMessage] = useState("");
+  const [summaryRunId, setSummaryRunId] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const samInput = useRef<HTMLInputElement>(null);
+  const samSourceInput = useRef<HTMLInputElement>(null);
+  const samResearchInput = useRef<HTMLInputElement>(null);
 
   const refreshSamStatus = async () => {
     try {
@@ -259,7 +301,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (page === "sources") void refreshSamStatus();
+    if (page === "sources" || page === "research") void refreshSamStatus();
   }, [page]);
 
   useEffect(() => {
@@ -274,6 +316,80 @@ export default function App() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [search]);
+
+  const loadRunSummary = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load research run summary.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryResearchTask = async (taskId: number, runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/tasks/${taskId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to retry research task.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryRunProblems = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/api/runs/${runId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${runId}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to retry research problems.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rerunResearch = async (runId: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request<{ item: Run }>(`/api/runs/${runId}/rerun`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: "local-user" }),
+      });
+      await refresh();
+      const data = await request<{ item: RunSummary }>(`/api/runs/${result.item.id}/summary`);
+      setRunSummary(data.item);
+      setSummaryRunId(result.item.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create a fresh research re-run.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -314,7 +430,7 @@ export default function App() {
     }
   };
 
-  const handleSamExtract = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleSamExtract = async (event: ChangeEvent<HTMLInputElement>, useResearchScope: boolean) => {
     const file = event.target.files?.[0];
     if (!file) return;
     setBusy(true);
@@ -323,15 +439,38 @@ export default function App() {
     try {
       const body = new FormData();
       body.append("file", file);
-      const result = await request<{ item: { filename: string; extract_date: string | null; record_count: number } }>(
-        "/api/sources/sam/extract",
-        { method: "POST", body },
-      );
-      setSamMessage(`Loaded ${result.item.filename} · ${result.item.record_count} firm exclusion records`);
+      let path = "/api/sources/sam/extract";
+      if (useResearchScope && researchScope === "selected" && selectedBidderIds.length) {
+        path += `?bidder_ids=${encodeURIComponent(selectedBidderIds.join(","))}`;
+      }
+      const result = await request<SamUploadResponse>(path, { method: "POST", body });
+      if (result.comparison) {
+        const ambiguous =
+          (result.comparison.status_counts.AMBIGUOUS_MATCH || 0) +
+          (result.comparison.status_counts.MANUAL_REVIEW_REQUIRED || 0);
+        const proposals = result.comparison.proposal_count;
+        const compared = result.comparison.run.bidder_count;
+        const issues = proposals + ambiguous;
+        if (issues > 0) {
+          setSamMessage(
+            `Compared ${compared} bidder${compared === 1 ? "" : "s"}. ${proposals} data difference${proposals === 1 ? "" : "s"} and ${ambiguous} identity match${ambiguous === 1 ? "" : "es"} need review.`,
+          );
+        } else {
+          setSamMessage(`Compared ${compared} bidder${compared === 1 ? "" : "s"}. No confirmed SAM differences were found.`);
+        }
+      } else {
+        setSamMessage(result.message);
+      }
       await refreshSamStatus();
       await refresh();
+      if (result.comparison) {
+        const ambiguous =
+          (result.comparison.status_counts.AMBIGUOUS_MATCH || 0) +
+          (result.comparison.status_counts.MANUAL_REVIEW_REQUIRED || 0);
+        if (result.comparison.proposal_count > 0 || ambiguous > 0) setPage("review");
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load SAM exclusions extract.");
+      setError(err instanceof Error ? err.message : "Unable to load and compare the SAM exclusions extract.");
     } finally {
       setBusy(false);
       event.target.value = "";
@@ -422,6 +561,8 @@ export default function App() {
   ] as const;
 
   const readySources = useMemo(() => sources.filter((source) => source.status === "ready"), [sources]);
+  const samSelected = selectedSources.includes("sam");
+  const researchScopeCount = researchScope === "all" ? (dashboard?.bidder_count ?? 0) : selectedBidderIds.length;
 
   return (
     <div className="app-shell">
@@ -546,6 +687,7 @@ export default function App() {
                 <label className={`choice-card ${researchScope === "all" ? "selected" : ""}`}><input type="radio" checked={researchScope === "all"} onChange={() => setResearchScope("all")} /><div><strong>All approved bidders</strong><span>Run against all {dashboard?.bidder_count ?? 0} bidders in the current master.</span></div></label>
                 <label className={`choice-card ${researchScope === "selected" ? "selected" : ""}`}><input type="radio" checked={researchScope === "selected"} onChange={() => setResearchScope("selected")} /><div><strong>Selected bidders</strong><span>{selectedBidderIds.length ? `${selectedBidderIds.length} bidders selected in Bidder Database.` : "Select bidders from the database table first."}</span></div></label>
               </Card>
+
               <Card>
                 <div className="card-heading"><div><span className="section-kicker">Step 2</span><h2>Choose sources</h2><p>Only sources marked Ready can run.</p></div><ServerCog size={21} /></div>
                 <div className="source-checklist">
@@ -566,24 +708,93 @@ export default function App() {
                 </div>
                 <div className="selection-actions"><button className="text-button" onClick={() => setSelectedSources(readySources.map((source) => source.key))}>Select all ready</button><button className="text-button" onClick={() => setSelectedSources([])}>Clear</button></div>
               </Card>
+
+              {samSelected && (
+                <Card>
+                  <div className="card-heading">
+                    <div>
+                      <span className="section-kicker">SAM dataset</span>
+                      <h2>Upload & Compare SAM Exclusions</h2>
+                      <p>No SAM API calls are used. Upload the official Public Exclusions V2 CSV or ZIP and the app immediately compares it against the bidder scope selected above.</p>
+                    </div>
+                    <ShieldCheck size={22} />
+                  </div>
+                  <div className="workflow-list">
+                    <div className="workflow-step">
+                      <div><Database size={14} /></div>
+                      <section><strong>Comparison scope</strong><span>{researchScope === "all" ? `All ${researchScopeCount} approved bidders` : `${researchScopeCount} selected bidder${researchScopeCount === 1 ? "" : "s"}`}</span></section>
+                    </div>
+                    <div className="workflow-step">
+                      <div><FileSearch size={14} /></div>
+                      <section><strong>Current SAM file</strong><span>{samStatus?.cached_extract ? `${samStatus.cached_extract}${samStatus.cached_extract_date ? ` · ${samStatus.cached_extract_date}` : ""} · ${samStatus.cached_record_count} firm records` : "No SAM extract uploaded yet"}</span></section>
+                    </div>
+                  </div>
+                  {samMessage && <div className="warning-box"><CheckCircle2 size={16} /><span>{samMessage}</span></div>}
+                  <div className="button-row">
+                    <button
+                      className="btn primary"
+                      disabled={busy || !dashboard?.active_import || (researchScope === "selected" && !selectedBidderIds.length)}
+                      onClick={() => samResearchInput.current?.click()}
+                    ><Upload size={16} /> Upload SAM CSV/ZIP & Compare</button>
+                    {!dashboard?.active_import && <span className="muted">Import the approved bidder database first.</span>}
+                  </div>
+                </Card>
+              )}
+
               <Card className="run-card">
                 <div>
                   <span className="section-kicker">Step 3</span>
                   <h2>Run research</h2>
                   <p>{researchScope === "all" ? `${dashboard?.bidder_count ?? 0} bidders` : `${selectedBidderIds.length} selected bidders`} × {selectedSources.length} ready source{selectedSources.length === 1 ? "" : "s"}</p>
-                  <p className="muted">Ready source adapters execute immediately. Evidence is stored separately; ambiguous identities and changed values are sent to Review.</p>
+                  <p className="muted">For SAM, uploading a file above already performs the comparison. This button can rerun the currently cached SAM file without uploading it again.</p>
                 </div>
                 <button className="btn primary large" disabled={busy || !selectedSources.length || (researchScope === "selected" && !selectedBidderIds.length)} onClick={() => void createRun()}><Play size={17} /> Run Research</button>
               </Card>
+
               <Card className="run-history">
                 <div className="card-heading"><div><span className="section-kicker">History</span><h2>Research Runs</h2></div></div>
-                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span></div>)}
+                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span><div className="button-row"><button className="btn ghost small" disabled={busy} onClick={() => void loadRunSummary(run.id)}>Summary</button><button className="btn ghost small" disabled={busy} onClick={() => void rerunResearch(run.id)}><Play size={13} /> Run Again</button></div></div>)}
+                {!runs.length ? <Empty compact title="No research runs yet" text="Completed and partial runs will appear here with their source status." /> : runs.map((run) => <div className="run-row" key={run.id}><div className="run-id">#{run.id}</div><div><strong>{run.bidder_count} bidders · {run.source_count} sources</strong><span>{formatDate(run.created_at)}</span></div><StatusPill status={run.status} /><span className="run-message">{run.message}</span><button className="btn ghost small" onClick={() => void loadRunSummary(run.id)}>Summary</button></div>)}
               </Card>
+
+              {runSummary && summaryRunId && (
+                <Card className="run-summary-card">
+                  <div className="card-heading">
+                    <div><span className="section-kicker">Research control panel</span><h2>Run #{summaryRunId} Summary</h2><p>{runSummary.expected_tasks} expected bidder × source checks · reconstructed from persisted research state.</p></div>
+                    <div className="button-row"><StatusPill status={runSummary.integrity_ok ? "completed" : "failed"} /><button className="icon-button" onClick={() => { setRunSummary(null); setSummaryRunId(null); }}><X size={16} /></button></div>
+                  </div>
+                  {!runSummary.integrity_ok && <div className="warning-box"><AlertTriangle size={16} /><div><strong>Run reconciliation problem</strong><span>{runSummary.integrity_issues.join(" · ")}</span></div></div>}
+                  <div className="summary-metrics">
+                    <SummaryMetric label="Completed" value={runSummary.counts.completed} />
+                    <SummaryMetric label="No match" value={runSummary.counts.no_match} />
+                    <SummaryMetric label="Changes" value={runSummary.change_count} />
+                    <SummaryMetric label="Ambiguous" value={runSummary.counts.ambiguous} />
+                    <SummaryMetric label="Partial" value={runSummary.counts.partial} />
+                    <SummaryMetric label="Blocked" value={runSummary.counts.blocked} />
+                    <SummaryMetric label="Failed" value={runSummary.counts.failed} />
+                    <SummaryMetric label="Not checked" value={runSummary.counts.not_checked} />
+                  </div>
+                  <div className="summary-section">
+                    <span className="section-kicker">Source reconciliation</span>
+                    <div className="table-wrap"><table><thead><tr><th>Source</th><th>Expected</th><th>Complete</th><th>No match</th><th>Changes</th><th>Ambiguous</th><th>Partial</th><th>Blocked</th><th>Failed</th><th>Retryable</th><th>Not checked</th></tr></thead><tbody>
+                      {runSummary.sources.map((source) => <tr key={source.source_key}><td><strong>{source.source_key.toUpperCase()}</strong></td><td>{source.expected}</td><td>{source.completed}</td><td>{source.no_match}</td><td>{source.change_count}</td><td>{source.ambiguous}</td><td>{source.partial}</td><td>{source.blocked}</td><td>{source.failed}</td><td>{source.retryable}</td><td>{source.not_checked}</td></tr>)}
+                    </tbody></table></div>
+                  </div>
+                  <div className="summary-section">
+                    <span className="section-kicker">Bidder × source detail</span>
+                    <div className="table-wrap summary-detail-table"><table><thead><tr><th>Bidder</th><th>Source</th><th>Outcome</th><th>Attempts</th><th>Identity</th><th>Completeness</th><th>Relevant DB changes</th><th>Evidence</th><th>Action</th></tr></thead><tbody>
+                      {runSummary.bidders.flatMap((bidder) => bidder.sources.map((task) => <tr key={task.task_id}><td>{bidder.contractor_name}</td><td>{task.source_key.toUpperCase()}</td><td><StatusPill status={task.summary_status} /></td><td>{task.attempt_count}</td><td>{task.identity_status ? statusLabel(task.identity_status) : "—"}</td><td>{task.completeness_status ? statusLabel(task.completeness_status) : "—"}</td><td>{task.changes.length ? task.changes.map((change) => `${prettyField(change.field_name)}: ${change.current_value || "—"} → ${change.proposed_value || "—"}`).join(" · ") : "None"}</td><td>{task.source_url ? <a href={task.source_url} target="_blank" rel="noreferrer" className="text-button">Source <ExternalLink size={13} /></a> : task.snapshot_id ? `Stored snapshot #${task.snapshot_id}` : "—"}</td><td>{task.retryable ? <button className="btn ghost small" disabled={busy} onClick={() => void retryResearchTask(task.task_id, summaryRunId)}><RefreshCw size={13} /> Retry</button> : <span className="muted">—</span>}</td></tr>))}
+                    </tbody></table></div>
+                  </div>
+                  <p className="modal-note">Retry repeats only transient or incomplete bidder × source tasks and preserves every prior check. Run Again creates a fresh run against the current approved database. Only source-owned bidder fields can appear as database changes.</p>
+                </Card>
+              )}
             </div>
           )}
 
           {page === "review" && (
             <div className="research-layout">
+              {samMessage && <div className="warning-box"><CheckCircle2 size={16} /><span>{samMessage}</span></div>}
               <Card>
                 <div className="card-heading"><div><span className="section-kicker">Identity review</span><h2>Confirm Company Matches</h2><p>Ambiguous source records stop here until a paralegal decides whether they are the same contractor.</p></div><ShieldCheck size={22} /></div>
                 {!identityReviewItems.length ? <Empty compact title="No identity matches waiting" text="Possible company matches that cannot be safely confirmed automatically will appear here." /> : (
@@ -658,10 +869,10 @@ export default function App() {
                     <h3>{source.name}</h3><p>{source.category}</p><a href={source.url} target="_blank" rel="noreferrer" className="source-url">{source.url}</a>
                     {source.key === "sam" && (
                       <div className="workflow-list" style={{ marginTop: 14 }}>
-                        <div className="workflow-step"><div><ShieldCheck size={14} /></div><section><strong>Public Exclusions V2</strong><span>{samStatus?.cached_extract ? `Cached: ${samStatus.cached_extract}${samStatus.cached_extract_date ? ` · ${samStatus.cached_extract_date}` : ""}` : "No local extract cached yet"}</span></section></div>
-                        <div className="workflow-step"><div>{samStatus?.api_key_configured ? "✓" : "—"}</div><section><strong>Automatic SAM download</strong><span>{samStatus?.api_key_configured ? "SAM_API_KEY is configured; the adapter can refresh the official extract automatically." : "No API key configured. You can upload the official SAM ZIP/CSV extract instead."}</span></section></div>
+                        <div className="workflow-step"><div><ShieldCheck size={14} /></div><section><strong>Public Exclusions V2</strong><span>{samStatus?.cached_extract ? `Loaded: ${samStatus.cached_extract}${samStatus.cached_extract_date ? ` · ${samStatus.cached_extract_date}` : ""} · ${samStatus.cached_record_count} firm records` : "No local extract loaded yet"}</span></section></div>
+                        <div className="workflow-step"><div><Upload size={14} /></div><section><strong>Manual file workflow</strong><span>SAM API calls are disabled. Upload the official CSV or ZIP; the app stores it locally and immediately compares it against all approved bidders.</span></section></div>
                         {samMessage && <div className="warning-box"><CheckCircle2 size={16} /><span>{samMessage}</span></div>}
-                        <button className="btn secondary" disabled={busy} onClick={() => samInput.current?.click()}><Upload size={16} /> Upload Official SAM Extract</button>
+                        <button className="btn secondary" disabled={busy || !dashboard?.active_import} onClick={() => samSourceInput.current?.click()}><Upload size={16} /> Upload SAM CSV/ZIP & Compare</button>
                       </div>
                     )}
                     <div className="source-card-footer"><span>{ready ? "Collector ready" : "Collector not started"}</span><button className="btn ghost small" disabled={!ready} onClick={() => selectSourceOnly(source)}>Configure run</button></div>
@@ -681,7 +892,8 @@ export default function App() {
       </main>
 
       <input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(event) => void handleFile(event)} />
-      <input ref={samInput} type="file" accept=".zip,.csv,application/zip,text/csv" hidden onChange={(event) => void handleSamExtract(event)} />
+      <input ref={samSourceInput} type="file" accept=".zip,.csv,application/zip,text/csv" hidden onChange={(event) => void handleSamExtract(event, false)} />
+      <input ref={samResearchInput} type="file" accept=".zip,.csv,application/zip,text/csv" hidden onChange={(event) => void handleSamExtract(event, true)} />
 
       {preview && (
         <div className="modal-backdrop">
@@ -733,6 +945,10 @@ export default function App() {
       {busy && <div className="busy-indicator"><RefreshCw size={15} className="spin" /> Working…</div>}
     </div>
   );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: number }) {
+  return <div className="summary-metric"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function Metric({ label, value, hint }: { label: string; value: string | number; hint: string }) {

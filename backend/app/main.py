@@ -18,13 +18,16 @@ from .import_validation import ValidationReport, validate_bidder_rows
 from .research.executor import execute_research_run
 from .research.field_mappings import SOURCE_FIELD_MAPPINGS
 from .research.identity_review import list_identity_review_items, resolve_identity_review
+from .research.retry_controls import rerun_research_run, retry_run_problems, retry_task
+from .research.run_summary import get_run_summary
 from .research.service import list_tasks, record_identity_judgment, review_change
+from .research.run_summary import get_run_summary
 from .research.sources.sam_exclusions import (
     MAX_EXTRACT_BYTES as SAM_MAX_EXTRACT_BYTES,
     SamExtractError,
-    SamExclusionsSource,
     store_uploaded_extract,
 )
+from .research.sources.sam_uploaded import SamUploadedExclusionsSource
 from .sources import SOURCES, SOURCE_KEYS
 
 APP_NAME = "Paralegal Research Desk"
@@ -39,7 +42,7 @@ EXPECTED_COLUMNS = [
     "dwd_substance_abuse_plan", "better_business_bureau_complaints", "misc_violations", "tax_liability",
 ]
 
-app = FastAPI(title=APP_NAME, version="0.3.0")
+app = FastAPI(title=APP_NAME, version="0.3.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -57,6 +60,10 @@ def startup() -> None:
 class RunRequest(BaseModel):
     source_keys: list[str]
     bidder_ids: list[int] | None = None
+
+
+class RetryRequest(BaseModel):
+    actor: str | None = None
 
 
 class IdentityJudgmentRequest(BaseModel):
@@ -133,9 +140,36 @@ def _validate_import(columns: list[str], rows: list[dict[str, str]]) -> Validati
     return report
 
 
+def _parse_bidder_scope(value: str | None) -> list[int] | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        bidder_ids = list(dict.fromkeys(int(part.strip()) for part in value.split(",") if part.strip()))
+    except ValueError as exc:
+        raise HTTPException(422, "bidder_ids must be a comma-separated list of bidder IDs.") from exc
+    if not bidder_ids:
+        return None
+    valid = [
+        bidder_id
+        for bidder_id in bidder_ids
+        if (item := db.get_bidder(bidder_id)) and item.get("_active")
+    ]
+    if len(valid) != len(bidder_ids):
+        raise HTTPException(422, "One or more selected bidders do not exist in the active master database.")
+    return valid
+
+
+def _compare_uploaded_sam_extract(bidder_ids: list[int] | None = None) -> dict | None:
+    bidder_count = len(bidder_ids) if bidder_ids else db.count_bidders()
+    if bidder_count == 0:
+        return None
+    run = db.create_run(bidder_ids, ["sam"], bidder_count)
+    return execute_research_run(run["id"])
+
+
 @app.get("/api/health")
 def health():
-    return {"name": APP_NAME, "status": "ok", "version": "0.3.0"}
+    return {"name": APP_NAME, "status": "ok", "version": "0.3.1"}
 
 
 @app.get("/api/schema")
@@ -177,23 +211,28 @@ def sources():
 @app.get("/api/sources/sam/status")
 def sam_status():
     try:
-        return {"item": SamExclusionsSource().health_check()}
+        return {"item": SamUploadedExclusionsSource().health_check()}
     except Exception as exc:
         raise HTTPException(500, f"Unable to inspect SAM source status: {exc}") from exc
 
 
 @app.post("/api/sources/sam/extract")
-async def upload_sam_extract(file: UploadFile = File(...)):
+async def upload_sam_extract(
+    file: UploadFile = File(...),
+    bidder_ids: str | None = Query(default=None),
+):
     data = await file.read()
     if not data:
         raise HTTPException(422, "The SAM extract is empty.")
     if len(data) > SAM_MAX_EXTRACT_BYTES:
         raise HTTPException(413, "The SAM extract exceeds the configured size limit.")
-    filename = Path(file.filename or "sam_exclusions.zip").name
+    filename = Path(file.filename or "sam_exclusions.csv").name
     try:
         dataset = store_uploaded_extract(data, filename)
     except SamExtractError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+    selected_bidder_ids = _parse_bidder_scope(bidder_ids)
     db.add_diagnostic(
         "INFO",
         "SAM exclusions extract loaded",
@@ -205,8 +244,27 @@ async def upload_sam_extract(file: UploadFile = File(...)):
             "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
             "record_count": len(dataset.records),
             "sha256": dataset.sha256,
+            "acquisition_mode": "manual_upload",
+            "bidder_scope": selected_bidder_ids or "all",
         },
     )
+
+    comparison = _compare_uploaded_sam_extract(selected_bidder_ids)
+    if comparison:
+        db.add_diagnostic(
+            "INFO",
+            "Uploaded SAM extract compared against approved bidder database",
+            source_key="sam",
+            stage="research",
+            details={
+                "run_id": comparison["run"]["id"],
+                "bidder_count": comparison["run"]["bidder_count"],
+                "executed": comparison["executed"],
+                "proposal_count": comparison["proposal_count"],
+                "status_counts": comparison["status_counts"],
+            },
+        )
+
     return {
         "item": {
             "filename": dataset.path.name,
@@ -214,7 +272,14 @@ async def upload_sam_extract(file: UploadFile = File(...)):
             "extract_date": dataset.extract_date.isoformat() if dataset.extract_date else None,
             "record_count": len(dataset.records),
             "sha256": dataset.sha256,
-        }
+            "acquisition_mode": "manual_upload",
+        },
+        "comparison": comparison,
+        "message": (
+            "SAM extract uploaded and compared against the approved bidder database."
+            if comparison
+            else "SAM extract uploaded. Import the bidder database to run the comparison."
+        ),
     }
 
 
@@ -345,9 +410,41 @@ def execute_run(run_id: int):
     return {"item": execution["run"], "execution": execution}
 
 
+@app.post("/api/tasks/{task_id}/retry")
+def retry_research_task(task_id: int, payload: RetryRequest):
+    try:
+        return {"item": retry_task(task_id, actor=payload.actor)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/retry")
+def retry_research_run(run_id: int, payload: RetryRequest):
+    try:
+        return {"item": retry_run_problems(run_id, actor=payload.actor)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/rerun")
+def rerun_research(run_id: int, payload: RetryRequest):
+    try:
+        return rerun_research_run(run_id, actor=payload.actor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get("/api/runs")
 def runs():
     return {"items": db.list_runs()}
+
+
+@app.get("/api/runs/{run_id}/summary")
+def run_summary(run_id: int):
+    try:
+        return {"item": get_run_summary(run_id)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/tasks")
