@@ -18,14 +18,13 @@ POTENTIALLY_RELATED_MASTER_FIELDS = {
 }
 
 
-def test_violation_tracker_stays_evidence_only_until_real_adapter_is_enabled():
+def test_violation_tracker_is_ready_but_remains_evidence_only():
     source = next(item for item in SOURCES if item["key"] == "violation_tracker")
 
-    # The public-search design is documented, but there is not yet a production
-    # adapter. The UI must not advertise the source as ready before one is
-    # registered in the common research pipeline.
-    assert source["status"] == "not_implemented"
-    assert "violation_tracker" not in implemented_source_keys()
+    # The free public-search adapter is implemented and registered in the common
+    # research pipeline, so the source picker may advertise it as ready.
+    assert source["status"] == "ready"
+    assert "violation_tracker" in implemented_source_keys()
     assert "free public search only" in source["category"].casefold()
 
     # Violation Tracker is a cross-agency evidence/discrepancy source. It may
