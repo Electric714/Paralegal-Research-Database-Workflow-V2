@@ -51,6 +51,28 @@ def list_tasks(research_run_id: int | None = None) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+def _pending_proposals(conn, *, bidder_id: int, source_key: str, field_name: str) -> list[Any]:
+    return conn.execute(
+        """
+        SELECT * FROM proposed_changes
+        WHERE bidder_id=? AND source_key=? AND field_name=? AND status='pending'
+        ORDER BY id
+        """,
+        (bidder_id, source_key, field_name),
+    ).fetchall()
+
+
+def _supersede_proposal(conn, proposal_id: int, *, now: str, note: str) -> None:
+    conn.execute(
+        """
+        UPDATE proposed_changes
+        SET status='superseded', reviewed_at=?, review_note=?
+        WHERE id=? AND status='pending'
+        """,
+        (now, note, proposal_id),
+    )
+
+
 def persist_source_result(task_id: int, result: SourceResult) -> dict[str, Any]:
     with db.connect() as conn:
         task = conn.execute("SELECT * FROM research_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -145,6 +167,8 @@ def persist_source_result(task_id: int, result: SourceResult) -> dict[str, Any]:
         snapshot_id = int(snapshot.lastrowid)
 
         proposal_ids: list[int] = []
+        reconfirmed_proposal_ids: list[int] = []
+        superseded_proposal_ids: list[int] = []
         for evidence in result.evidence:
             conn.execute(
                 """
@@ -165,33 +189,62 @@ def persist_source_result(task_id: int, result: SourceResult) -> dict[str, Any]:
 
             observed = "" if evidence.observed_value is None else str(evidence.observed_value).strip()
             current = "" if master.get(evidence.field_name) is None else str(master.get(evidence.field_name, "")).strip()
-            can_propose = (
+            comparable = (
                 bool(observed)
-                and observed != current
                 and source_owns_field(result.source_key, evidence.field_name)
                 and result.status in PROPOSAL_ELIGIBLE_STATUSES
                 and result.identity_status == IdentityStatus.CONFIRMED
                 and result.completeness_status == CompletenessStatus.COMPLETE
             )
-            if can_propose:
-                proposal = conn.execute(
-                    """
-                    INSERT INTO proposed_changes(
-                        bidder_id, evidence_snapshot_id, source_key, field_name,
-                        current_value, proposed_value, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-                    """,
-                    (
-                        result.contractor_id,
-                        snapshot_id,
-                        result.source_key,
-                        evidence.field_name,
-                        current,
-                        observed,
-                        now,
-                    ),
+            if not comparable:
+                continue
+
+            pending = _pending_proposals(
+                conn,
+                bidder_id=result.contractor_id,
+                source_key=result.source_key,
+                field_name=evidence.field_name,
+            )
+            duplicate_pending_id: int | None = None
+            for prior in pending:
+                prior_id = int(prior["id"])
+                prior_current = "" if prior["current_value"] is None else str(prior["current_value"]).strip()
+                prior_proposed = "" if prior["proposed_value"] is None else str(prior["proposed_value"]).strip()
+                if observed != current and prior_current == current and prior_proposed == observed:
+                    duplicate_pending_id = prior_id
+                    if prior_id not in reconfirmed_proposal_ids:
+                        reconfirmed_proposal_ids.append(prior_id)
+                    continue
+                _supersede_proposal(
+                    conn,
+                    prior_id,
+                    now=now,
+                    note=f"Superseded by newer complete confirmed evidence snapshot {snapshot_id}.",
                 )
-                proposal_ids.append(int(proposal.lastrowid))
+                if prior_id not in superseded_proposal_ids:
+                    superseded_proposal_ids.append(prior_id)
+
+            if observed == current or duplicate_pending_id is not None:
+                continue
+
+            proposal = conn.execute(
+                """
+                INSERT INTO proposed_changes(
+                    bidder_id, evidence_snapshot_id, source_key, field_name,
+                    current_value, proposed_value, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    result.contractor_id,
+                    snapshot_id,
+                    result.source_key,
+                    evidence.field_name,
+                    current,
+                    observed,
+                    now,
+                ),
+            )
+            proposal_ids.append(int(proposal.lastrowid))
 
         add_audit_event(
             conn,
@@ -207,9 +260,17 @@ def persist_source_result(task_id: int, result: SourceResult) -> dict[str, Any]:
                 "identity_status": result.identity_status.value,
                 "completeness_status": result.completeness_status.value,
                 "proposal_ids": proposal_ids,
+                "reconfirmed_proposal_ids": reconfirmed_proposal_ids,
+                "superseded_proposal_ids": superseded_proposal_ids,
             },
         )
-        return {"source_check_id": source_check_id, "snapshot_id": snapshot_id, "proposal_ids": proposal_ids}
+        return {
+            "source_check_id": source_check_id,
+            "snapshot_id": snapshot_id,
+            "proposal_ids": proposal_ids,
+            "reconfirmed_proposal_ids": reconfirmed_proposal_ids,
+            "superseded_proposal_ids": superseded_proposal_ids,
+        }
 
 
 def record_identity_judgment(
@@ -273,6 +334,45 @@ def review_change(change_id: int, *, decision: str, actor: str | None = None, no
             raise ValueError("Proposed change has already been reviewed.")
 
         now = utcnow()
+        bidder = None
+        row_data: dict[str, Any] | None = None
+        if decision == "approved":
+            bidder = conn.execute("SELECT row_json FROM bidders WHERE id = ?", (change["bidder_id"],)).fetchone()
+            if not bidder:
+                raise ValueError("Bidder no longer exists.")
+            row_data = json.loads(bidder["row_json"])
+            live_current = "" if row_data.get(change["field_name"]) is None else str(row_data.get(change["field_name"], "")).strip()
+            expected_current = "" if change["current_value"] is None else str(change["current_value"]).strip()
+            if live_current != expected_current:
+                stale_note = (
+                    f"Superseded because the approved master changed from the proposal baseline "
+                    f"{expected_current!r} to {live_current!r} before approval."
+                )
+                conn.execute(
+                    """
+                    UPDATE proposed_changes
+                    SET status='superseded', reviewed_at=?, reviewed_by=?, review_note=?
+                    WHERE id=?
+                    """,
+                    (now, actor, stale_note, change_id),
+                )
+                add_audit_event(
+                    conn,
+                    "proposed_change_superseded",
+                    f"Proposed change {change_id} was superseded because the master changed before approval.",
+                    actor=actor,
+                    bidder_id=int(change["bidder_id"]),
+                    source_key=str(change["source_key"]),
+                    entity_type="proposed_change",
+                    entity_id=change_id,
+                    details={
+                        "expected_current_value": expected_current,
+                        "live_current_value": live_current,
+                        "requested_decision": decision,
+                    },
+                )
+                return {"change_id": change_id, "decision": "superseded", "revision_id": None, "stale": True}
+
         conn.execute(
             """
             UPDATE proposed_changes
@@ -284,10 +384,7 @@ def review_change(change_id: int, *, decision: str, actor: str | None = None, no
 
         revision_id = None
         if decision == "approved":
-            bidder = conn.execute("SELECT row_json FROM bidders WHERE id = ?", (change["bidder_id"],)).fetchone()
-            if not bidder:
-                raise ValueError("Bidder no longer exists.")
-            row_data = json.loads(bidder["row_json"])
+            assert row_data is not None
             row_data[change["field_name"]] = change["proposed_value"] or ""
             conn.execute(
                 "UPDATE bidders SET row_json = ? WHERE id = ?",
@@ -330,4 +427,4 @@ def review_change(change_id: int, *, decision: str, actor: str | None = None, no
             entity_id=change_id,
             details={"decision": decision, "revision_id": revision_id, "note": note},
         )
-        return {"change_id": change_id, "decision": decision, "revision_id": revision_id}
+        return {"change_id": change_id, "decision": decision, "revision_id": revision_id, "stale": False}

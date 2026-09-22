@@ -64,7 +64,7 @@ def _set_run_status(run_id: int, status: str, message: str, *, completed: bool =
 
 
 def execute_research_run(run_id: int) -> dict[str, Any]:
-    db.get_run(run_id)  # validates that the run exists
+    db.get_run(run_id)
     tasks = list_tasks(run_id)
     pending = [task for task in tasks if str(task["status"]) == SourceResultStatus.NOT_CHECKED.value]
     executable = [task for task in pending if task["source_key"] in implemented_source_keys()]
