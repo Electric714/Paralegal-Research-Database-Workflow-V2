@@ -17,6 +17,11 @@ class ContractorContext:
     city: str = ""
     state: str = ""
     zip: str = ""
+    additional_address: str = ""
+    additional_address_city: str = ""
+    additional_address_state: str = ""
+    additional_address_zip: str = ""
+    dfi: str = ""
 
 
 class ResearchSource(ABC):
