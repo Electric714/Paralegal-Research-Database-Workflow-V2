@@ -38,7 +38,7 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "violation_tracker": SourceFieldMapping(
         "violation_tracker",
         frozenset(),
-        "Useful evidence source, but exact bidder-field ownership must be confirmed before automatic proposals.",
+        "Cross-agency evidence-only source. Findings may be stored and compared, but Violation Tracker intentionally owns no master fields and cannot directly create master-field proposals.",
     ),
     "wisdot": SourceFieldMapping(
         "wisdot",
@@ -58,7 +58,7 @@ SOURCE_FIELD_MAPPINGS: dict[str, SourceFieldMapping] = {
     "responsible_mn": SourceFieldMapping(
         "responsible_mn",
         frozenset(),
-        "Exact bidder-field ownership must be confirmed before automatic proposals.",
+        "Comparison-only Responsible Minnesota ineligibility evidence. mndol_ineligibility is the candidate legacy field, but automatic ownership is disabled until the firm's exact semantics are confirmed.",
     ),
 }
 

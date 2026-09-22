@@ -48,6 +48,7 @@ def test_search_plan_preserves_commas_inside_legal_name_and_deduplicates_aliases
         "ACME NORTH",
     ]
     assert len(plan["locations"]) == 2
+    assert "no-match is not proof" in plan["instructions"]
 
 
 def test_adapter_stops_for_operator_instead_of_scraping_public_wcca():
@@ -69,10 +70,11 @@ def test_no_match_with_missing_alias_is_partial_not_clean_negative():
     assert result.status == SourceResultStatus.PARTIAL_RESULTS
     assert result.completeness_status == CompletenessStatus.PARTIAL
     assert result.is_clean_negative is False
+    assert not any(item.field_name == "circuit_court" for item in result.evidence)
     assert any("not confirmed as searched" in warning for warning in result.warnings)
 
 
-def test_complete_no_match_is_clean_negative_but_only_comparison_evidence():
+def test_complete_public_no_match_never_becomes_circuit_court_n():
     c = contractor()
     plan = build_search_plan(c)
     result = build_operator_result(
@@ -84,12 +86,15 @@ def test_complete_no_match_is_clean_negative_but_only_comparison_evidence():
     assert result.status == SourceResultStatus.SUCCESS_NO_MATCH
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.is_clean_negative is True
-    assert result.evidence[0].field_name == "circuit_court"
-    assert result.evidence[0].observed_value == "N"
-    assert result.evidence[0].details["comparison_only"] is True
+    assert not any(item.field_name == "circuit_court" for item in result.evidence)
+    assert [(item.field_name, item.observed_value) for item in result.evidence] == [
+        ("wcca_public_search", "NO_CURRENTLY_DISPLAYED_MATCH")
+    ]
+    assert result.evidence[0].details["does_not_establish_circuit_court_n"] is True
+    assert result.normalized_payload["field_observation"] is None
 
 
-def test_confirmed_case_is_complete_positive_when_all_aliases_checked():
+def test_confirmed_case_is_complete_positive_and_keeps_case_level_evidence():
     c = contractor()
     plan = build_search_plan(c)
     result = build_operator_result(
@@ -105,6 +110,9 @@ def test_confirmed_case_is_complete_positive_when_all_aliases_checked():
                 "matched_party_name": "ACME ELECTRIC, LLC",
                 "case_type": "Civil",
                 "case_status": "Open",
+                "filing_date": "2026-01-15",
+                "disposition": "Pending",
+                "case_url": "https://wcca.wicourts.gov/caseDetail.html?caseNo=2026CV000123",
             }
         ],
     )
@@ -112,7 +120,48 @@ def test_confirmed_case_is_complete_positive_when_all_aliases_checked():
     assert result.identity_status == IdentityStatus.CONFIRMED
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.source_record_id == "2026CV000123"
-    assert result.evidence[0].observed_value == "Y"
+    assert result.normalized_payload["field_observation"] == "Y"
+    assert [(item.field_name, item.observed_value) for item in result.evidence] == [
+        ("circuit_court", "Y"),
+        ("wcca_case", "2026CV000123"),
+    ]
+    case_evidence = result.evidence[1]
+    assert case_evidence.details["matched_party_name"] == "ACME ELECTRIC, LLC"
+    assert case_evidence.details["filing_date"] == "2026-01-15"
+    assert case_evidence.details["disposition"] == "Pending"
+
+
+def test_claimed_positive_requires_case_number_and_matched_party_name():
+    c = contractor()
+    plan = build_search_plan(c)
+    result = build_operator_result(
+        c,
+        searched_names=plan["search_names"],
+        outcome="findings",
+        operator_confirmed_complete=True,
+        identity_confirmed=True,
+        cases=[{"county": "Dane", "matched_party_name": "ACME ELECTRIC, LLC"}],
+    )
+    assert result.status == SourceResultStatus.MANUAL_REVIEW_REQUIRED
+    assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
+    assert not any(item.field_name == "circuit_court" for item in result.evidence)
+    assert any("case number and matched party/business name" in warning for warning in result.warnings)
+
+
+def test_confirmed_positive_can_be_retained_even_when_search_is_partial():
+    c = contractor()
+    result = build_operator_result(
+        c,
+        searched_names=["ACME ELECTRIC, LLC"],
+        outcome="findings",
+        operator_confirmed_complete=False,
+        identity_confirmed=True,
+        cases=[{"case_number": "2026CV000123", "matched_party_name": "ACME ELECTRIC, LLC"}],
+    )
+    assert result.status == SourceResultStatus.PARTIAL_RESULTS
+    assert result.identity_status == IdentityStatus.CONFIRMED
+    assert result.completeness_status == CompletenessStatus.PARTIAL
+    assert any(item.field_name == "circuit_court" and item.observed_value == "Y" for item in result.evidence)
 
 
 def test_wcca_evidence_cannot_create_master_proposal_until_semantics_confirmed(isolated_db):
@@ -161,7 +210,10 @@ def test_wcca_evidence_cannot_create_master_proposal_until_semantics_confirmed(i
     assert db.get_bidder(bidder_id)["circuit_court"] == "N"
     with db.connect() as conn:
         evidence = conn.execute(
-            "SELECT field_name, observed_value FROM evidence_records WHERE evidence_snapshot_id=?",
+            "SELECT field_name, observed_value FROM evidence_records WHERE evidence_snapshot_id=? ORDER BY id",
             (persisted["snapshot_id"],),
         ).fetchall()
-    assert [(row["field_name"], row["observed_value"]) for row in evidence] == [("circuit_court", "Y")]
+    assert [(row["field_name"], row["observed_value"]) for row in evidence] == [
+        ("circuit_court", "Y"),
+        ("wcca_case", "2026CV000123"),
+    ]
