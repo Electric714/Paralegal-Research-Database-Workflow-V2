@@ -20,6 +20,9 @@ DATA_VIEW_URL = "https://data.pca.state.mn.us/views/Enforcementactionswithpenalt
 CSV_EXPORT_URL = DATA_VIEW_URL + ".csv?:showVizHome=no"
 TIMEOUT_SECONDS = 30.0
 USER_AGENT = "ParalegalResearchDatabaseV2/1.0 (+targeted official MPCA enforcement research)"
+FUZZY_REVIEW_THRESHOLD = 94.0
+TOKEN_SUBSET_REVIEW_THRESHOLD = 100.0
+TOKEN_SUBSET_MIN_TOKENS = 2
 
 NAME_HEADERS = ("company or individual(s)", "company or individual", "regulated party", "company", "facility name")
 DATE_HEADERS = ("public date", "date", "closed date")
@@ -107,6 +110,28 @@ def _party_segments(value: str) -> list[str]:
     return parts or [value.strip()]
 
 
+def _should_review_name_variant(approved_name: str, candidate_name: str, wratio: float) -> bool:
+    """Keep plausible entity-name variants visible instead of emitting a false clean no-match.
+
+    WRatio catches typos and punctuation variation. token_set_ratio catches common legal-name
+    expansions such as "Acme Construction" vs "Acme Construction Services" where all tokens
+    of the shorter approved name are present in the longer source name. These are review-only;
+    they never become automatic confirmed matches.
+    """
+
+    if wratio >= FUZZY_REVIEW_THRESHOLD:
+        return True
+    approved_tokens = approved_name.split()
+    candidate_tokens = candidate_name.split()
+    if min(len(approved_tokens), len(candidate_tokens)) < TOKEN_SUBSET_MIN_TOKENS:
+        return False
+    return fuzz.token_set_ratio(approved_name, candidate_name) >= TOKEN_SUBSET_REVIEW_THRESHOLD
+
+
+class MinnesotaPcaEnforcementSource(ResearchSource):
+    source_key = "mn_pca"
+    display_name = "Minnesota PCA Enforcement Actions"
+    adapter_version = "1.0.1"
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
@@ -179,6 +204,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                         exact.append((record, name, basis, segment))
                         break
                     score = fuzz.WRatio(name_norm, segment_norm)
+                    if _should_review_name_variant(name_norm, segment_norm, score):
+                        ambiguous.append((record, name, basis, segment, score / 100.0))
+
                     if score >= 94:
                         ambiguous.append((record, name, basis, segment, score / 100.0))
 

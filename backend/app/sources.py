@@ -10,9 +10,10 @@ SOURCES = [
     {"key": "bbb", "name": "Better Business Bureau", "url": "https://www.bbb.org/", "category": "Business complaints", "status": "ready"},
     {"key": "violation_tracker", "name": "Violation Tracker", "url": "https://violationtracker.goodjobsfirst.org/", "category": "Cross-agency enforcement evidence · free public search only", "status": "ready"},
     {"key": "wisdot", "name": "Wisconsin DOT Contractor Information", "url": "https://wisconsindot.gov/Pages/doing-bus/contractors/hcci/cntrct-info.aspx", "category": "Contractor eligibility / debarment · automatic official PDF refresh", "status": "ready"},
-    {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://enforcedata.dol.gov/views/data_catalogs.php", "category": "Labor enforcement", "status": "not_implemented"},
+    {"key": "dol_enforcement", "name": "U.S. Department of Labor Enforcement Data", "url": "https://data.dol.gov/", "category": "Labor enforcement · official DOL v4 API · requires DOL_API_KEY", "status": "ready"},
     {"key": "gsa_state_debarment", "name": "GSA OIG State Suspension & Debarment Directory", "url": "https://www.gsaig.gov/content/suspension-and-debarment-sites-state", "category": "State debarment directory", "status": "not_implemented"},
     {"key": "mn_debarment", "name": "Minnesota Suspended/Debarred Vendors", "url": "https://mn.gov/admin/osp/government/suspended-debarred/", "category": "State suspension / debarment", "status": "ready"},
+    {"key": "responsible_mn", "name": "Responsible Minnesota", "url": "https://responsiblemn.org/ineligible-contractors/", "category": "Contractor responsibility · comparison-only ineligibility evidence", "status": "ready"},
     {"key": "responsible_mn", "name": "Responsible Minnesota", "url": "http://responsiblemn.org/", "category": "Contractor responsibility", "status": "not_implemented"},
     {"key": "mn_pca", "name": "Minnesota PCA Enforcement Actions", "url": "https://data.pca.state.mn.us/views/Enforcementactionswithpenalties/Complianceandenforcementnumberofcasesperyear", "category": "Environmental enforcement · official MPCA structured dataset", "status": "ready"},
 ]
