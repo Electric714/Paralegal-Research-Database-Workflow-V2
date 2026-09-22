@@ -8,6 +8,18 @@ from .base import ContractorContext, ResearchSource
 
 PUBLIC_WCCA_URL = "https://wcca.wicourts.gov/index.xsl"
 ACQUISITION_METHOD = "operator_assisted_public_wcca"
+CORE_CASE_FIELDS = ("case_number", "matched_party_name")
+CASE_FIELDS = (
+    "case_number",
+    "county",
+    "matched_party_name",
+    "case_type",
+    "case_status",
+    "filing_date",
+    "disposition",
+    "case_url",
+    "note",
+)
 
 
 def _canonical(value: str) -> str:
@@ -28,6 +40,19 @@ def _search_names(contractor: ContractorContext) -> list[str]:
             seen.add(key)
             result.append(cleaned)
     return result
+
+
+def _normalize_cases(cases: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in cases or []:
+        row = {field: re.sub(r"\s+", " ", str(raw.get(field) or "").strip()) for field in CASE_FIELDS}
+        if any(row.values()):
+            result.append(row)
+    return result
+
+
+def _case_has_core_identifiers(case: dict[str, str]) -> bool:
+    return all(case.get(field, "").strip() for field in CORE_CASE_FIELDS)
 
 
 def build_search_plan(contractor: ContractorContext) -> dict[str, Any]:
@@ -56,9 +81,38 @@ def build_search_plan(contractor: ContractorContext) -> dict[str, Any]:
         "public_url": PUBLIC_WCCA_URL,
         "instructions": (
             "Search each listed business/party name in the statewide WCCA public search. "
-            "Complete any CAPTCHA manually. Record confirmed cases or explicitly mark the search incomplete."
+            "Complete any CAPTCHA manually. Record confirmed cases or explicitly mark the search incomplete. "
+            "A public WCCA no-match is not proof that no circuit-court record exists."
         ),
     }
+
+
+def _case_evidence(case_rows: list[dict[str, str]], *, identity_confirmed: bool) -> list[EvidenceRecord]:
+    evidence: list[EvidenceRecord] = []
+    for case in case_rows:
+        if not case.get("case_number"):
+            continue
+        details = {
+            "matched_party_name": case.get("matched_party_name", ""),
+            "county": case.get("county", ""),
+            "case_type": case.get("case_type", ""),
+            "case_status": case.get("case_status", ""),
+            "filing_date": case.get("filing_date", ""),
+            "disposition": case.get("disposition", ""),
+            "note": case.get("note", ""),
+            "identity_confirmed": identity_confirmed,
+            "comparison_only": True,
+        }
+        evidence.append(
+            EvidenceRecord(
+                field_name="wcca_case",
+                observed_value=case["case_number"],
+                source_record_id=case["case_number"],
+                source_url=case.get("case_url") or PUBLIC_WCCA_URL,
+                details=details,
+            )
+        )
+    return evidence
 
 
 def build_operator_result(
@@ -78,7 +132,8 @@ def build_operator_result(
     all_names_searched = bool(expected) and expected.issubset(searched)
     complete = operator_confirmed_complete and all_names_searched
     normalized_outcome = outcome.strip().lower()
-    case_rows = [dict(item) for item in (cases or []) if any(str(value or "").strip() for value in item.values())]
+    case_rows = _normalize_cases(cases)
+    core_complete = bool(case_rows) and all(_case_has_core_identifiers(case) for case in case_rows)
 
     warnings: list[str] = []
     if missing:
@@ -86,9 +141,20 @@ def build_operator_result(
     if operator_confirmed_complete and not all_names_searched:
         warnings.append("Operator marked the search complete, but one or more planned names were not checked; result forced to partial.")
 
+    field_observation: str | None = None
+    evidence: list[EvidenceRecord] = []
+
     if normalized_outcome == "findings":
+        evidence.extend(_case_evidence(case_rows, identity_confirmed=identity_confirmed))
         if not case_rows:
             warnings.append("Findings outcome was selected without a case record; result requires manual review.")
+            status = SourceResultStatus.MANUAL_REVIEW_REQUIRED
+            identity_status = IdentityStatus.REVIEW_REQUIRED
+            completeness = CompletenessStatus.PARTIAL
+        elif not core_complete:
+            warnings.append(
+                "A confirmed WCCA finding requires both a case number and matched party/business name for every recorded case."
+            )
             status = SourceResultStatus.MANUAL_REVIEW_REQUIRED
             identity_status = IdentityStatus.REVIEW_REQUIRED
             completeness = CompletenessStatus.PARTIAL
@@ -96,68 +162,98 @@ def build_operator_result(
             status = SourceResultStatus.AMBIGUOUS_MATCH
             identity_status = IdentityStatus.REVIEW_REQUIRED
             completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
-        elif complete:
-            status = SourceResultStatus.SUCCESS_WITH_FINDINGS
-            identity_status = IdentityStatus.CONFIRMED
-            completeness = CompletenessStatus.COMPLETE
         else:
-            status = SourceResultStatus.PARTIAL_RESULTS
             identity_status = IdentityStatus.CONFIRMED
-            completeness = CompletenessStatus.PARTIAL
-        observed_value = "Y"
+            completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
+            status = SourceResultStatus.SUCCESS_WITH_FINDINGS if complete else SourceResultStatus.PARTIAL_RESULTS
+            field_observation = "Y"
+            evidence.insert(
+                0,
+                EvidenceRecord(
+                    field_name="circuit_court",
+                    observed_value="Y",
+                    source_record_id=case_rows[0]["case_number"],
+                    source_url=case_rows[0].get("case_url") or PUBLIC_WCCA_URL,
+                    details={
+                        "comparison_only": True,
+                        "proposal_blocked_reason": (
+                            "Legacy circuit_court semantics have not yet been confirmed with the firm."
+                        ),
+                        "case_count": len(case_rows),
+                        "searched_names": searched_names,
+                        "missing_planned_names": missing,
+                        "positive_only_rule": True,
+                    },
+                ),
+            )
     elif normalized_outcome == "no_match":
         identity_status = IdentityStatus.NOT_EVALUATED
         if complete:
             status = SourceResultStatus.SUCCESS_NO_MATCH
             completeness = CompletenessStatus.COMPLETE
+            evidence.append(
+                EvidenceRecord(
+                    field_name="wcca_public_search",
+                    observed_value="NO_CURRENTLY_DISPLAYED_MATCH",
+                    source_url=PUBLIC_WCCA_URL,
+                    details={
+                        "searched_names": searched_names,
+                        "operator_confirmed_complete": True,
+                        "does_not_establish_circuit_court_n": True,
+                        "reason": (
+                            "WCCA is not a complete court record and online display/access limitations mean a public no-match "
+                            "cannot safely be converted to circuit_court=N."
+                        ),
+                    },
+                )
+            )
         else:
             status = SourceResultStatus.PARTIAL_RESULTS
             completeness = CompletenessStatus.PARTIAL
-            warnings.append("A WCCA no-match is clean only after every planned name is searched and completion is explicitly confirmed.")
-        observed_value = "N"
+            warnings.append("A WCCA no-match is complete only after every planned name is searched and completion is explicitly confirmed.")
+        warnings.append(
+            "No currently displayed WCCA match does not prove that the contractor has no historical, sealed, redacted, non-displayed, or otherwise unavailable circuit-court record."
+        )
     elif normalized_outcome == "ambiguous":
+        evidence.extend(_case_evidence(case_rows, identity_confirmed=False))
         status = SourceResultStatus.AMBIGUOUS_MATCH
         identity_status = IdentityStatus.REVIEW_REQUIRED
         completeness = CompletenessStatus.COMPLETE if complete else CompletenessStatus.PARTIAL
-        observed_value = None
     elif normalized_outcome == "blocked":
         status = SourceResultStatus.BLOCKED
         identity_status = IdentityStatus.NOT_EVALUATED
         completeness = CompletenessStatus.PARTIAL
-        observed_value = None
     elif normalized_outcome == "partial":
+        evidence.extend(_case_evidence(case_rows, identity_confirmed=identity_confirmed))
         status = SourceResultStatus.PARTIAL_RESULTS
-        identity_status = IdentityStatus.CONFIRMED if identity_confirmed else IdentityStatus.NOT_EVALUATED
+        identity_status = IdentityStatus.CONFIRMED if identity_confirmed and core_complete else IdentityStatus.NOT_EVALUATED
         completeness = CompletenessStatus.PARTIAL
-        observed_value = "Y" if case_rows and identity_confirmed else None
+        if identity_confirmed and case_rows and not core_complete:
+            identity_status = IdentityStatus.REVIEW_REQUIRED
+            warnings.append(
+                "The partial search includes a claimed positive, but the case number and matched party/business name are required before identity can be treated as confirmed."
+            )
+        elif identity_confirmed and core_complete:
+            field_observation = "Y"
+            evidence.insert(
+                0,
+                EvidenceRecord(
+                    field_name="circuit_court",
+                    observed_value="Y",
+                    source_record_id=case_rows[0]["case_number"],
+                    source_url=case_rows[0].get("case_url") or PUBLIC_WCCA_URL,
+                    details={
+                        "comparison_only": True,
+                        "case_count": len(case_rows),
+                        "search_incomplete": True,
+                        "positive_only_rule": True,
+                    },
+                ),
+            )
     else:
         raise ValueError("WCCA outcome must be findings, no_match, ambiguous, partial, or blocked.")
 
-    source_record_id = None
-    for item in case_rows:
-        case_number = str(item.get("case_number") or "").strip()
-        if case_number:
-            source_record_id = case_number
-            break
-
-    evidence: list[EvidenceRecord] = []
-    if observed_value is not None:
-        evidence.append(
-            EvidenceRecord(
-                field_name="circuit_court",
-                observed_value=observed_value,
-                source_record_id=source_record_id,
-                source_url=PUBLIC_WCCA_URL,
-                details={
-                    "comparison_only": True,
-                    "proposal_blocked_reason": "Legacy circuit_court semantics have not yet been confirmed with the firm.",
-                    "case_count": len(case_rows),
-                    "searched_names": searched_names,
-                    "missing_planned_names": missing,
-                },
-            )
-        )
-
+    source_record_id = next((case.get("case_number") for case in case_rows if case.get("case_number")), None)
     payload = {
         "search_plan": plan,
         "searched_names": searched_names,
@@ -167,9 +263,11 @@ def build_operator_result(
         "outcome": normalized_outcome,
         "cases": case_rows,
         "operator_note": operator_note or "",
+        "field_observation": field_observation,
         "field_semantics": {
-            "circuit_court": "comparison_only_pending_firm_confirmation",
+            "circuit_court": "positive_only_comparison_pending_firm_confirmation",
             "ccap_show150": "undefined_no_write",
+            "public_no_match": "source_level_only_not_master_negative",
         },
     }
 
@@ -188,16 +286,16 @@ def build_operator_result(
         source_record_id=source_record_id,
         source_url=PUBLIC_WCCA_URL,
         acquisition_method=ACQUISITION_METHOD,
-        adapter_version="0.1.0",
-        parser_version="operator-v1",
+        adapter_version="0.2.0",
+        parser_version="operator-v2",
     )
 
 
 class WccaOperatorAssistedSource(ResearchSource):
     source_key = "wcca"
     display_name = "Wisconsin Circuit Court Access / CCAP"
-    adapter_version = "0.1.0"
-    parser_version = "operator-v1"
+    adapter_version = "0.2.0"
+    parser_version = "operator-v2"
 
     def health_check(self) -> dict[str, Any]:
         return {
@@ -206,6 +304,7 @@ class WccaOperatorAssistedSource(ResearchSource):
             "implemented": True,
             "public_url": PUBLIC_WCCA_URL,
             "acquisition_method": ACQUISITION_METHOD,
+            "negative_field_updates": False,
         }
 
     def search(self, contractor: ContractorContext) -> SourceResult:
@@ -225,5 +324,7 @@ class WccaOperatorAssistedSource(ResearchSource):
                 normalized_payload={"search_plan": plan},
                 source_url=PUBLIC_WCCA_URL,
                 acquisition_method=ACQUISITION_METHOD,
+                adapter_version=self.adapter_version,
+                parser_version=self.parser_version,
             )
         )
