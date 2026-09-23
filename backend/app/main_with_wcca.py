@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .main import app
+from .research.run_control import recover_interrupted_runs
 from .run_control_api import router as run_control_router
 from .wcca_api import router as wcca_router
 
@@ -14,3 +15,11 @@ for route in frontend_mounts:
 app.include_router(wcca_router)
 app.include_router(run_control_router)
 app.router.routes.extend(frontend_mounts)
+
+
+@app.on_event("startup")
+def recover_interrupted_research_runs() -> None:
+    # app.main's startup handler initializes the database first. Any run still marked
+    # active after a process restart cannot have a live executor thread, so make it
+    # explicitly resumable/stopped instead of leaving a zombie "running" status.
+    recover_interrupted_runs()
