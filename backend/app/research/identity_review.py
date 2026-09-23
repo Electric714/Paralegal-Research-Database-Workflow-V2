@@ -18,6 +18,17 @@ def _snapshot_payload(raw: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _candidate_ids(payload: dict[str, Any]) -> set[str]:
+    candidates = payload.get("top_candidates", [])
+    if not isinstance(candidates, list):
+        return set()
+    return {
+        str(candidate.get("source_record_id") or "").strip()
+        for candidate in candidates
+        if isinstance(candidate, dict) and str(candidate.get("source_record_id") or "").strip()
+    }
+
+
 def list_identity_review_items(limit: int = 200) -> list[dict[str, Any]]:
     with db.connect() as conn:
         rows = conn.execute(
@@ -27,6 +38,7 @@ def list_identity_review_items(limit: int = 200) -> list[dict[str, Any]]:
             JOIN bidders b ON b.id = es.bidder_id
             JOIN source_checks sc ON sc.id = es.source_check_id
             WHERE es.identity_status = 'REVIEW_REQUIRED'
+              AND b._active = 1
             ORDER BY es.id DESC
             LIMIT ?
             """,
@@ -40,12 +52,36 @@ def list_identity_review_items(limit: int = 200) -> list[dict[str, Any]]:
             if not isinstance(candidates, list):
                 continue
 
+            # Evidence snapshots are immutable, but the active review queue must not
+            # keep asking about candidates that a newer COMPLETE check no longer
+            # considers plausible. This is especially important after matcher
+            # hardening: old false-positive SAM candidates stay in evidence history,
+            # while a later clean no-match removes them from the live review queue.
+            newer_complete = conn.execute(
+                """
+                SELECT id, normalized_json
+                FROM evidence_snapshots
+                WHERE bidder_id=? AND source_key=?
+                  AND completeness_status='COMPLETE' AND id>?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(row["bidder_id"]), str(row["source_key"]), int(row["id"])),
+            ).fetchone()
+            current_candidate_ids: set[str] | None = None
+            if newer_complete:
+                current_candidate_ids = _candidate_ids(
+                    _snapshot_payload(str(newer_complete["normalized_json"]))
+                )
+
             unresolved: list[dict[str, Any]] = []
             for candidate in candidates:
                 if not isinstance(candidate, dict):
                     continue
                 source_record_id = str(candidate.get("source_record_id") or "").strip()
                 if not source_record_id:
+                    continue
+                if current_candidate_ids is not None and source_record_id not in current_candidate_ids:
                     continue
                 judgment = conn.execute(
                     """
