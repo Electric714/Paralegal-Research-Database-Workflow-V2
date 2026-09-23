@@ -21,6 +21,8 @@ from .sam_exclusions import (
 
 FUZZY_REVIEW_CUTOFF = 94.0
 GLOBAL_FUZZY_REVIEW_CUTOFF = 97.0
+FUZZY_WHOLE_NAME_FLOOR = 88.0
+GLOBAL_FUZZY_WHOLE_NAME_FLOOR = 92.0
 
 
 def _zip5(value: str) -> str:
@@ -32,6 +34,25 @@ def _street_number(value: str) -> str:
     normalized = normalize_text(value)
     first = normalized.split(" ", 1)[0] if normalized else ""
     return first if any(char.isdigit() for char in first) else ""
+
+
+def _whole_name_similarity(left: str, right: str) -> float:
+    """Score the whole company names without RapidFuzz's partial/subset bonus.
+
+    WRatio is useful for typo discovery, but it can give a very high score when a
+    short generic name is only a subset of a longer company name. Requiring a high
+    whole-name score prevents examples such as ``Duran Roofing Services`` versus
+    ``Roofing Services`` from becoming identity-review noise.
+    """
+
+    normalized_left = normalize_company_name(left)
+    normalized_right = normalize_company_name(right)
+    if not normalized_left or not normalized_right:
+        return 0.0
+    return max(
+        fuzz.ratio(normalized_left, normalized_right),
+        fuzz.token_sort_ratio(normalized_left, normalized_right),
+    )
 
 
 def _location_corroborates(
@@ -85,7 +106,7 @@ def _location_corroborates(
 class SamUploadedExclusionsSource(SamExclusionsSource):
     """SAM exclusions adapter for a locally uploaded official Public V2 extract."""
 
-    adapter_version = "1.4.0"
+    adapter_version = "1.5.0"
 
     def __init__(self, *, cache_dir: Path | None = None, today: date | None = None) -> None:
         super().__init__(cache_dir=cache_dir, today=today)
@@ -169,6 +190,11 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
         state_choices = self._name_choices_by_state.get(state, []) if state else []
         choices = state_choices or self._name_choices_global
         cutoff = FUZZY_REVIEW_CUTOFF if state_choices else GLOBAL_FUZZY_REVIEW_CUTOFF
+        whole_name_floor = (
+            FUZZY_WHOLE_NAME_FLOOR
+            if state_choices
+            else GLOBAL_FUZZY_WHOLE_NAME_FLOOR
+        )
 
         for normalized in normalized_names:
             if not choices:
@@ -180,7 +206,13 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
                 limit=10,
                 score_cutoff=cutoff,
             ):
-                if similarity >= cutoff:
+                # WRatio includes partial/token-set behavior. That is useful for
+                # discovery, but not sufficient evidence of company identity. Require
+                # the entire normalized names to remain strongly similar as well.
+                if (
+                    similarity >= cutoff
+                    and _whole_name_similarity(normalized, choice) >= whole_name_floor
+                ):
                     add_name(choice)
 
         return result
@@ -195,6 +227,10 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
             normalize_company_name(match.matched_search_name)
             == normalize_company_name(match.matched_record_name)
         )
+        whole_name_score = _whole_name_similarity(
+            match.matched_search_name,
+            match.matched_record_name,
+        ) / 100.0
         location_corroborated = _location_corroborates(contractor, record, match)
 
         # Only an exact approved company name/alias plus meaningful address evidence
@@ -208,12 +244,17 @@ class SamUploadedExclusionsSource(SamExclusionsSource):
             # a false SUCCESS_NO_MATCH.
             score = max(score, 0.80)
         elif not exact_name:
-            if match.name_score >= 0.94 and location_corroborated:
-                # Near-exact names with independent address evidence remain visible,
-                # but only for human review.
+            if (
+                match.name_score >= 0.94
+                and whole_name_score >= FUZZY_WHOLE_NAME_FLOOR / 100.0
+                and location_corroborated
+            ):
+                # Near-exact whole names with independent address evidence remain
+                # visible, but only for human review.
                 score = max(score, 0.80)
             else:
-                # Generic-word lookalikes are noise and should not enter review.
+                # Partial-name/subset matches and generic-word lookalikes are noise
+                # and should never enter the identity-review queue.
                 score = min(score, 0.71)
 
         return CandidateMatch(
