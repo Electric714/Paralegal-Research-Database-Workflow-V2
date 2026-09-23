@@ -25,7 +25,7 @@ def request_cancel(run_id: int, *, actor: str | None = None) -> dict[str, Any]:
     status = str(run.get("status"))
     if status == CANCELLED_STATUS:
         return run
-    if status not in {"planned", "running", "partial", "cancel_requested"}:
+    if status not in {"planned", "running", "cancel_requested"}:
         raise ValueError(f"Research run {run_id} is already {status} and cannot be stopped.")
 
     if status != "cancel_requested":
