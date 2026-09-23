@@ -114,7 +114,7 @@ def _honor_control_request(
         )
         diagnostic_message = "Research run stopped"
         severity = "WARNING"
-    else:  # defensive; requested_action currently returns only the two states above
+    else:
         return None
 
     _set_run_status(run_id, status, message, completed=completed)
@@ -249,7 +249,7 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             adapter = adapters[source_key]
             try:
                 result = adapter.search(contractor)
-            except Exception as exc:  # source bugs must not abort an entire research run
+            except Exception as exc:
                 result = _unexpected_failure(task, contractor, exc)
                 db.add_diagnostic(
                     "ERROR",
@@ -300,8 +300,6 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         if controlled is not None:
             return controlled
 
-    # Close the small race where a stop/pause arrives after the last task but before
-    # the executor writes its normal completed/partial status.
     controlled = _honor_control_request(
         run_id,
         status_counts=status_counts,
@@ -324,17 +322,22 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         SourceResultStatus.PARTIAL_RESULTS.value,
         SourceResultStatus.AMBIGUOUS_MATCH.value,
         SourceResultStatus.MANUAL_REVIEW_REQUIRED.value,
+        SourceResultStatus.SESSION_EXPIRED.value,
+        SourceResultStatus.PAGINATION_INCOMPLETE.value,
     }
-    issue_count = sum(count for status, count in status_counts.items() if status in issue_statuses)
-    if skipped or issue_count:
-        final_status = "partial"
-    else:
-        final_status = "completed"
 
-    status_summary = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items())) or "no executed tasks"
+    # A run can span multiple execution passes after pause/resume. Determine the final
+    # state from every persisted task, not only the tasks executed in this pass.
+    final_tasks = list_tasks(run_id)
+    cumulative_counts: Counter[str] = Counter(str(task["status"]) for task in final_tasks)
+    cumulative_issue_count = sum(count for status, count in cumulative_counts.items() if status in issue_statuses)
+    cumulative_pending = cumulative_counts.get(SourceResultStatus.NOT_CHECKED.value, 0)
+    final_status = "partial" if cumulative_pending or cumulative_issue_count else "completed"
+
+    status_summary = ", ".join(f"{key}={value}" for key, value in sorted(cumulative_counts.items())) or "no tasks"
     message = (
-        f"Executed {sum(status_counts.values())} task(s); {proposal_count} proposed change(s); "
-        f"{len(skipped)} unimplemented task(s) skipped. {status_summary}"
+        f"Run has {len(final_tasks) - cumulative_pending}/{len(final_tasks)} task(s) processed; "
+        f"{proposal_count} proposed change(s) created in this pass. {status_summary}"
     )
     _set_run_status(run_id, final_status, message, completed=True)
     db.add_diagnostic(
@@ -344,8 +347,9 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         details={
             "run_id": run_id,
             "status": final_status,
-            "status_counts": dict(status_counts),
-            "proposal_count": proposal_count,
+            "status_counts": dict(cumulative_counts),
+            "executed_this_pass": sum(status_counts.values()),
+            "proposal_count_this_pass": proposal_count,
             "skipped_unimplemented": len(skipped),
             "already_processed": len(already_processed),
         },
