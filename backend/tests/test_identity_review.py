@@ -6,9 +6,15 @@ from pathlib import Path
 import pytest
 
 from app import database as db
+from app.research import executor
 from app.research.executor import execute_research_run
 from app.research.identity_review import list_identity_review_items, resolve_identity_review
-from app.research.models import SourceResultStatus
+from app.research.models import (
+    CompletenessStatus,
+    IdentityStatus,
+    SourceResult,
+    SourceResultStatus,
+)
 from app.research.service import list_tasks
 from app.research.sources.sam_exclusions import store_uploaded_extract
 
@@ -37,6 +43,26 @@ def _load_current_sam_extract():
         filename,
         cache_dir=db.DATA_DIR / "source_cache" / "sam",
     )
+
+
+class _CleanSamNoMatchSource:
+    source_key = "sam"
+
+    def prepare(self) -> None:
+        return None
+
+    def search(self, contractor):
+        return SourceResult(
+            source_key="sam",
+            contractor_id=contractor.internal_id,
+            status=SourceResultStatus.SUCCESS_NO_MATCH,
+            identity_status=IdentityStatus.NOT_EVALUATED,
+            completeness_status=CompletenessStatus.COMPLETE,
+            searched_name=contractor.contractor_name,
+            searched_address=contractor.address_1,
+            normalized_payload={"candidate_count": 0, "top_candidates": []},
+            acquisition_method="test_clean_sam_check",
+        )
 
 
 def test_ambiguous_sam_match_can_be_resolved_without_mutating_old_evidence(isolated_db):
@@ -187,3 +213,49 @@ def test_rejected_sam_candidate_is_remembered_and_not_reasked(isolated_db):
             for candidate in item["candidates"]
         }
         assert "100000002" not in remaining_ids
+
+
+def test_newer_complete_clean_check_removes_stale_ambiguous_candidates_from_queue(
+    isolated_db,
+    monkeypatch,
+):
+    _load_current_sam_extract()
+    db.replace_master_database(
+        "master.csv",
+        ["id", "contractor_name", "city", "state", "state_federal_debarment"],
+        [{
+            "id": "7",
+            "contractor_name": "Common Builders LLC",
+            "city": "Madison",
+            "state": "WI",
+            "state_federal_debarment": "N",
+        }],
+        str(isolated_db / "master.csv"),
+    )
+
+    old_run = db.create_run(None, ["sam"], 1)
+    first = execute_research_run(old_run["id"])
+    assert first["status_counts"] == {SourceResultStatus.AMBIGUOUS_MATCH.value: 1}
+    old_review = list_identity_review_items()
+    assert old_review
+    old_snapshot_id = old_review[0]["snapshot_id"]
+
+    # Simulate a matcher hardening or newer adapter result: a later COMPLETE check
+    # finds that none of the old candidates are plausible anymore.
+    monkeypatch.setattr(executor, "implemented_source_keys", lambda: frozenset({"sam"}))
+    monkeypatch.setattr(executor, "create_source", lambda source_key: _CleanSamNoMatchSource())
+    new_run = db.create_run(None, ["sam"], 1)
+    second = executor.execute_research_run(new_run["id"])
+    assert second["status_counts"] == {SourceResultStatus.SUCCESS_NO_MATCH.value: 1}
+
+    assert list_identity_review_items() == []
+
+    # The stale review is removed only from the active queue. Its original immutable
+    # evidence snapshot remains in history for audit/provenance.
+    with db.connect() as conn:
+        old_snapshot = conn.execute(
+            "SELECT id, identity_status FROM evidence_snapshots WHERE id=?",
+            (old_snapshot_id,),
+        ).fetchone()
+    assert old_snapshot is not None
+    assert old_snapshot["identity_status"] == "REVIEW_REQUIRED"
