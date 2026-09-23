@@ -1,0 +1,52 @@
+/* Identity-review cards need substantially more structure than the compact bidder
+   detail grid. These rules keep SAM candidates readable and prevent adjacent <small>
+   elements from running together into strings such as "33196Ineligible". */
+
+.choice-card.selected .detail-grid {
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+  width: 100%;
+  margin-top: 14px;
+}
+
+.choice-card.selected .detail-grid .detail-field {
+  min-width: 0;
+  padding: 14px 15px;
+  border: 1px solid #dde5ed;
+  border-radius: 9px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.choice-card.selected .detail-grid .detail-field > span {
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.choice-card.selected .detail-grid .detail-field > strong {
+  margin-top: 7px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.choice-card.selected .detail-grid .detail-field > small {
+  display: block;
+  margin-top: 6px;
+  color: #66768a;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.choice-card.selected .detail-grid .detail-field .button-row {
+  flex-wrap: wrap;
+  margin-top: 12px !important;
+  padding-top: 12px;
+  border-top: 1px solid #edf1f5;
+}
+
+@media (max-width: 1250px) {
+  .choice-card.selected .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
