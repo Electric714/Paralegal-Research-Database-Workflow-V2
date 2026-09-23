@@ -77,6 +77,12 @@ def test_duran_roofing_does_not_surface_unrelated_miami_firms(isolated_db, tmp_p
             {"Name": "Florida Wire & Rigging Works, Inc.", "Address 1": "2475 NW 38th St.", "City": "Miami", "State / Province": "FL", "Zip Code": "33142", "SAM Number": "M2"},
             {"Name": "ALL EQUIPMENTS SERVICES, INC", "Address 1": "7209 SW 24 STREET", "City": "Miami", "State / Province": "FL", "Zip Code": "33155", "SAM Number": "M3"},
             {"Name": "UROLOGY P A", "Address 1": "33 NORTHEAST 4TH ST", "City": "Miami", "State / Province": "FL", "Zip Code": "33101", "SAM Number": "M4"},
+            # Exact false positives captured from the 9/21 review screenshots. These
+            # are unrelated businesses and must never be surfaced for A-1 Duran.
+            {"Name": "Alsi Care Services, Inc.", "Address 1": "10105 Southwest 2nd Ter.", "City": "Miami", "State / Province": "FL", "Zip Code": "33174", "SAM Number": "S1"},
+            {"Name": "305 Immigration Services, LLC.", "Address 1": "11815 SW 150 PL", "City": "Miami", "State / Province": "FL", "Zip Code": "33196", "SAM Number": "S2"},
+            {"Name": "SWISSCO MANAGEMENT GROUP INC", "Address 1": "7975 NW 154TH ST STE 400", "City": "HIALEAH", "State / Province": "FL", "Zip Code": "33016", "SAM Number": "S3"},
+            {"Name": "A Health and Stress Free", "Address 1": "2851 Northeast 183rd St. 1614", "City": "Aventura", "State / Province": "FL", "Zip Code": "33160", "SAM Number": "S4"},
         ],
     )
     result = source.search(
