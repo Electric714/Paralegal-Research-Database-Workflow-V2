@@ -105,3 +105,60 @@ def prepare_resume(run_id: int, *, actor: str | None = None) -> dict[str, Any]:
         details={"run_id": run_id, "actor": actor},
     )
     return item
+
+
+def recover_interrupted_runs() -> list[int]:
+    """Normalize runs left active when the local application process was restarted.
+
+    A Python process restart guarantees no prior executor thread is still alive. Runs
+    that were running (or waiting to pause) are therefore converted to PAUSED so the
+    operator can inspect/export them and explicitly resume. A stop that was already
+    requested is completed as CANCELLED.
+    """
+
+    recovered: list[int] = []
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, status FROM research_runs WHERE status IN ('running', 'pause_requested', 'stop_requested') ORDER BY id"
+        ).fetchall()
+        now = db.utcnow()
+        for row in rows:
+            run_id = int(row["id"])
+            status = str(row["status"])
+            if status == STOP_REQUESTED:
+                conn.execute(
+                    """
+                    UPDATE research_runs
+                    SET status=?, message=?, completed_at=COALESCE(completed_at, ?)
+                    WHERE id=?
+                    """,
+                    (
+                        CANCELLED,
+                        "Research stop completed when the application restarted. Unchecked tasks were not executed.",
+                        now,
+                        run_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE research_runs
+                    SET status=?, message=?
+                    WHERE id=?
+                    """,
+                    (
+                        PAUSED,
+                        "Research execution was interrupted by an application restart. Remaining unchecked tasks are preserved and can be resumed.",
+                        run_id,
+                    ),
+                )
+            recovered.append(run_id)
+
+    for run_id in recovered:
+        db.add_diagnostic(
+            "WARNING",
+            "Interrupted research run recovered after application restart",
+            stage="research",
+            details={"run_id": run_id},
+        )
+    return recovered
