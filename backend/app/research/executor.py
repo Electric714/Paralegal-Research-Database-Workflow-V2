@@ -5,6 +5,7 @@ from typing import Any
 
 from .. import database as db
 from .models import CompletenessStatus, IdentityStatus, SourceResult, SourceResultStatus
+from .run_control import CANCELLED, PAUSED, PAUSE_REQUESTED, STOP_REQUESTED, requested_action
 from .service import list_tasks, persist_source_result
 from .source_registry import create_source, implemented_source_keys
 from .sources.base import ContractorContext
@@ -63,35 +64,115 @@ def _set_run_status(run_id: int, status: str, message: str, *, completed: bool =
         )
 
 
+def _execution_payload(
+    run_id: int,
+    *,
+    status_counts: Counter[str] | None = None,
+    skipped: int = 0,
+    already_processed: int = 0,
+    proposal_count: int = 0,
+) -> dict[str, Any]:
+    counts = status_counts or Counter()
+    return {
+        "run": db.get_run(run_id),
+        "executed": sum(counts.values()),
+        "skipped": skipped,
+        "already_processed": already_processed,
+        "proposal_count": proposal_count,
+        "status_counts": dict(counts),
+    }
+
+
+def _honor_control_request(
+    run_id: int,
+    *,
+    status_counts: Counter[str],
+    skipped: int,
+    already_processed: int,
+    proposal_count: int,
+) -> dict[str, Any] | None:
+    action = requested_action(run_id)
+    if action is None:
+        return None
+
+    executed = sum(status_counts.values())
+    if action == PAUSE_REQUESTED:
+        status = PAUSED
+        completed = False
+        message = (
+            f"Research paused by the user after {executed} task(s) in this execution pass. "
+            "Remaining unchecked tasks can be resumed later."
+        )
+        diagnostic_message = "Research run paused"
+        severity = "INFO"
+    elif action == STOP_REQUESTED:
+        status = CANCELLED
+        completed = True
+        message = (
+            f"Research stopped by the user after {executed} task(s) in this execution pass. "
+            "Remaining unchecked tasks were not executed."
+        )
+        diagnostic_message = "Research run stopped"
+        severity = "WARNING"
+    else:  # defensive; requested_action currently returns only the two states above
+        return None
+
+    _set_run_status(run_id, status, message, completed=completed)
+    db.add_diagnostic(
+        severity,
+        diagnostic_message,
+        stage="research",
+        details={
+            "run_id": run_id,
+            "executed_this_pass": executed,
+            "proposal_count": proposal_count,
+            "skipped_unimplemented": skipped,
+            "already_processed": already_processed,
+        },
+    )
+    return _execution_payload(
+        run_id,
+        status_counts=status_counts,
+        skipped=skipped,
+        already_processed=already_processed,
+        proposal_count=proposal_count,
+    )
+
+
 def execute_research_run(run_id: int) -> dict[str, Any]:
-    db.get_run(run_id)
+    run = db.get_run(run_id)
+    if str(run["status"]) in {PAUSED, CANCELLED}:
+        return _execution_payload(run_id)
+
     tasks = list_tasks(run_id)
     pending = [task for task in tasks if str(task["status"]) == SourceResultStatus.NOT_CHECKED.value]
     executable = [task for task in pending if task["source_key"] in implemented_source_keys()]
     skipped = [task for task in pending if task["source_key"] not in implemented_source_keys()]
     already_processed = [task for task in tasks if str(task["status"]) != SourceResultStatus.NOT_CHECKED.value]
 
+    status_counts: Counter[str] = Counter()
+    proposal_count = 0
+
+    controlled = _honor_control_request(
+        run_id,
+        status_counts=status_counts,
+        skipped=len(skipped),
+        already_processed=len(already_processed),
+        proposal_count=proposal_count,
+    )
+    if controlled is not None:
+        return controlled
+
     if not executable:
         if already_processed:
-            run = db.get_run(run_id)
-            return {
-                "run": run,
-                "executed": 0,
-                "skipped": len(skipped),
-                "already_processed": len(already_processed),
-                "proposal_count": 0,
-                "status_counts": {},
-            }
+            return _execution_payload(
+                run_id,
+                skipped=len(skipped),
+                already_processed=len(already_processed),
+            )
         message = "No selected sources have implemented adapters yet."
         _set_run_status(run_id, "planned", message)
-        return {
-            "run": db.get_run(run_id),
-            "executed": 0,
-            "skipped": len(skipped),
-            "already_processed": 0,
-            "proposal_count": 0,
-            "status_counts": {},
-        }
+        return _execution_payload(run_id, skipped=len(skipped))
 
     _set_run_status(run_id, "running", f"Running {len(executable)} implemented research tasks.")
     db.add_diagnostic(
@@ -108,10 +189,18 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
 
     adapters: dict[str, Any] = {}
     prepare_errors: dict[str, Exception] = {}
-    status_counts: Counter[str] = Counter()
-    proposal_count = 0
 
     for source_key in sorted({str(task["source_key"]) for task in executable}):
+        controlled = _honor_control_request(
+            run_id,
+            status_counts=status_counts,
+            skipped=len(skipped),
+            already_processed=len(already_processed),
+            proposal_count=proposal_count,
+        )
+        if controlled is not None:
+            return controlled
+
         try:
             adapter = create_source(source_key)
             if adapter is None:
@@ -128,7 +217,27 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
                 details={"run_id": run_id, "error": repr(exc)},
             )
 
+        controlled = _honor_control_request(
+            run_id,
+            status_counts=status_counts,
+            skipped=len(skipped),
+            already_processed=len(already_processed),
+            proposal_count=proposal_count,
+        )
+        if controlled is not None:
+            return controlled
+
     for task in executable:
+        controlled = _honor_control_request(
+            run_id,
+            status_counts=status_counts,
+            skipped=len(skipped),
+            already_processed=len(already_processed),
+            proposal_count=proposal_count,
+        )
+        if controlled is not None:
+            return controlled
+
         task_id = int(task["id"])
         bidder_id = int(task["bidder_id"])
         source_key = str(task["source_key"])
@@ -178,6 +287,31 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
                 },
             )
 
+        # Pause/stop is cooperative: a source request already in flight is allowed to
+        # return and persist its evidence, then the executor exits before starting the
+        # next bidder/source task. This avoids corrupting immutable evidence snapshots.
+        controlled = _honor_control_request(
+            run_id,
+            status_counts=status_counts,
+            skipped=len(skipped),
+            already_processed=len(already_processed),
+            proposal_count=proposal_count,
+        )
+        if controlled is not None:
+            return controlled
+
+    # Close the small race where a stop/pause arrives after the last task but before
+    # the executor writes its normal completed/partial status.
+    controlled = _honor_control_request(
+        run_id,
+        status_counts=status_counts,
+        skipped=len(skipped),
+        already_processed=len(already_processed),
+        proposal_count=proposal_count,
+    )
+    if controlled is not None:
+        return controlled
+
     issue_statuses = {
         SourceResultStatus.AUTH_REQUIRED.value,
         SourceResultStatus.BLOCKED.value,
@@ -216,11 +350,10 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             "already_processed": len(already_processed),
         },
     )
-    return {
-        "run": db.get_run(run_id),
-        "executed": sum(status_counts.values()),
-        "skipped": len(skipped),
-        "already_processed": len(already_processed),
-        "proposal_count": proposal_count,
-        "status_counts": dict(status_counts),
-    }
+    return _execution_payload(
+        run_id,
+        status_counts=status_counts,
+        skipped=len(skipped),
+        already_processed=len(already_processed),
+        proposal_count=proposal_count,
+    )
