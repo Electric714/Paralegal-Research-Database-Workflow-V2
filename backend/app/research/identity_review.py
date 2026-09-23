@@ -38,7 +38,7 @@ def list_identity_review_items(limit: int = 200) -> list[dict[str, Any]]:
             JOIN bidders b ON b.id = es.bidder_id
             JOIN source_checks sc ON sc.id = es.source_check_id
             WHERE es.identity_status = 'REVIEW_REQUIRED'
-              AND b._active = 1
+              AND b.active = 1
             ORDER BY es.id DESC
             LIMIT ?
             """,
