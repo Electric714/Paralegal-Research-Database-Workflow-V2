@@ -39,6 +39,53 @@ function Test-AppOnline {
     }
 }
 
+function Stop-ExistingApp {
+    $StoppedProcessIds = @()
+
+    if (Test-Path $PidFile) {
+        $SavedPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($SavedPid -and $SavedPid -match '^\d+$') {
+            $SavedProcess = Get-Process -Id ([int]$SavedPid) -ErrorAction SilentlyContinue
+            if ($SavedProcess) {
+                Write-Host 'Stopping existing Paralegal Research Desk backend so current code is loaded...'
+                Stop-Process -Id $SavedProcess.Id -Force -ErrorAction SilentlyContinue
+                $StoppedProcessIds += $SavedProcess.Id
+                try { Wait-Process -Id $SavedProcess.Id -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # Older launcher versions could leave a healthy backend running without a usable
+    # PID file. If this port is still serving our app, stop that listener as well.
+    if (Test-AppOnline) {
+        try {
+            $Listener = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction Stop | Select-Object -First 1
+            if ($Listener -and $Listener.OwningProcess -and ($StoppedProcessIds -notcontains [int]$Listener.OwningProcess)) {
+                $ListenerProcess = Get-Process -Id ([int]$Listener.OwningProcess) -ErrorAction SilentlyContinue
+                if ($ListenerProcess) {
+                    Write-Host 'Stopping stale backend listener on port 8000...'
+                    Stop-Process -Id $ListenerProcess.Id -Force -ErrorAction SilentlyContinue
+                    try { Wait-Process -Id $ListenerProcess.Id -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+        }
+        catch {
+            # If Get-NetTCPConnection is unavailable, the health check below will
+            # fail closed rather than silently reusing stale backend state.
+        }
+    }
+
+    $Deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $Deadline -and (Test-AppOnline)) {
+        Start-Sleep -Milliseconds 250
+    }
+
+    if (Test-AppOnline) {
+        throw 'An older Paralegal Research Desk backend is still running on port 8000. Close it and run START_HERE.bat again.'
+    }
+}
+
 Write-Host ''
 Write-Host '==============================================='
 Write-Host ' Paralegal Research Desk'
@@ -122,38 +169,35 @@ finally {
 
 Write-Host '[7/7] Starting application...'
 
+# Always restart the project backend after rebuilding. Reusing an existing Python
+# process leaves module-level source metadata cached in memory and can make the
+# Research page show sources as not implemented even after those adapters were merged.
+Stop-ExistingApp
+
+$StartArgs = @{
+    FilePath = $VenvPython
+    ArgumentList = @('-m', 'uvicorn', 'app.main_with_wcca:app', '--host', '127.0.0.1', '--port', '8000')
+    WorkingDirectory = $Backend
+    WindowStyle = 'Hidden'
+    RedirectStandardOutput = $StdoutLog
+    RedirectStandardError = $StderrLog
+    PassThru = $true
+}
+$Process = Start-Process @StartArgs
+Set-Content -Path $PidFile -Value $Process.Id -Encoding ascii
+
+$Deadline = (Get-Date).AddSeconds(45)
+while ((Get-Date) -lt $Deadline) {
+    if (Test-AppOnline) { break }
+    if ($Process.HasExited) {
+        $ErrorTail = if (Test-Path $StderrLog) { (Get-Content $StderrLog -Tail 25) -join [Environment]::NewLine } else { 'No server error log was created.' }
+        throw "The application server stopped during startup.`n`n$ErrorTail"
+    }
+    Start-Sleep -Milliseconds 500
+}
+
 if (-not (Test-AppOnline)) {
-    if (Test-Path $PidFile) {
-        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-    }
-
-    $StartArgs = @{
-        FilePath = $VenvPython
-        ArgumentList = @('-m', 'uvicorn', 'app.main_with_wcca:app', '--host', '127.0.0.1', '--port', '8000')
-        WorkingDirectory = $Backend
-        WindowStyle = 'Hidden'
-        RedirectStandardOutput = $StdoutLog
-        RedirectStandardError = $StderrLog
-        PassThru = $true
-    }
-    $Process = Start-Process @StartArgs
-    Set-Content -Path $PidFile -Value $Process.Id -Encoding ascii
-
-    $Deadline = (Get-Date).AddSeconds(45)
-    while ((Get-Date) -lt $Deadline) {
-        if (Test-AppOnline) { break }
-        if ($Process.HasExited) {
-            $ErrorTail = if (Test-Path $StderrLog) { (Get-Content $StderrLog -Tail 25) -join [Environment]::NewLine } else { 'No server error log was created.' }
-            throw "The application server stopped during startup.`n`n$ErrorTail"
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    if (-not (Test-AppOnline)) {
-        throw "The application did not respond in time. Check: $StderrLog"
-    }
-} else {
-    Write-Host 'Application is already running; opening it now.'
+    throw "The application did not respond in time. Check: $StderrLog"
 }
 
 Start-Process $Url
