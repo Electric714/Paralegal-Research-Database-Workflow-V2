@@ -11,6 +11,37 @@ from .source_registry import create_source, implemented_source_keys
 from .sources.base import ContractorContext
 
 
+# These outcomes describe a source/session/dataset problem rather than something
+# specific to one bidder. Once one is observed, continuing to hit the same source
+# for every remaining bidder only creates an error storm and can worsen rate limits.
+SOURCE_WIDE_FAILURE_STATUSES = frozenset(
+    {
+        SourceResultStatus.AUTH_REQUIRED,
+        SourceResultStatus.BLOCKED,
+        SourceResultStatus.SESSION_EXPIRED,
+        SourceResultStatus.SOURCE_UNAVAILABLE,
+        SourceResultStatus.DATASET_MALFORMED,
+        SourceResultStatus.LAYOUT_CHANGED,
+    }
+)
+
+DIAGNOSTIC_PROBLEM_STATUSES = frozenset(
+    {
+        SourceResultStatus.AUTH_REQUIRED,
+        SourceResultStatus.BLOCKED,
+        SourceResultStatus.HTTP_ERROR,
+        SourceResultStatus.SOURCE_UNAVAILABLE,
+        SourceResultStatus.DATASET_MALFORMED,
+        SourceResultStatus.LAYOUT_CHANGED,
+        SourceResultStatus.PARSER_FAILURE,
+        SourceResultStatus.SESSION_EXPIRED,
+        SourceResultStatus.TIMEOUT,
+    }
+)
+
+TERMINAL_RUN_STATUSES = frozenset({"completed", "partial", CANCELLED})
+
+
 def _contractor_context(bidder_id: int) -> ContractorContext:
     bidder = db.get_bidder(bidder_id)
     if not bidder:
@@ -71,6 +102,7 @@ def _execution_payload(
     skipped: int = 0,
     already_processed: int = 0,
     proposal_count: int = 0,
+    short_circuited: int = 0,
 ) -> dict[str, Any]:
     counts = status_counts or Counter()
     return {
@@ -80,7 +112,101 @@ def _execution_payload(
         "already_processed": already_processed,
         "proposal_count": proposal_count,
         "status_counts": dict(counts),
+        "short_circuited": short_circuited,
     }
+
+
+def _note_unattempted_source_tasks(
+    run_id: int,
+    source_key: str,
+    status: SourceResultStatus,
+    warnings: list[str],
+) -> int:
+    """Annotate, but do not falsely complete, tasks skipped by the circuit breaker."""
+    reason = "; ".join(warnings[:3]) if warnings else status.value
+    message = (
+        f"Not attempted because {source_key} was halted after a source-wide "
+        f"{status.value} result: {reason}"
+    )
+    with db.connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE research_tasks
+            SET last_error=?
+            WHERE research_run_id=? AND source_key=? AND status=?
+            """,
+            (message, run_id, source_key, SourceResultStatus.NOT_CHECKED.value),
+        )
+        return int(cur.rowcount)
+
+
+def _record_problem(
+    summaries: dict[tuple[str, str], dict[str, Any]],
+    *,
+    source_key: str,
+    status: SourceResultStatus,
+    bidder_name: str | None = None,
+    warnings: list[str] | None = None,
+    short_circuited: int = 0,
+) -> None:
+    key = (source_key, status.value)
+    item = summaries.setdefault(
+        key,
+        {
+            "source_key": source_key,
+            "status": status.value,
+            "observed_count": 0,
+            "short_circuited": 0,
+            "sample_bidders": [],
+            "warnings": [],
+        },
+    )
+    item["observed_count"] += 1
+    item["short_circuited"] += short_circuited
+    if bidder_name and bidder_name not in item["sample_bidders"] and len(item["sample_bidders"]) < 3:
+        item["sample_bidders"].append(bidder_name)
+    for warning in warnings or []:
+        if warning and warning not in item["warnings"] and len(item["warnings"]) < 5:
+            item["warnings"].append(warning)
+
+
+def _add_short_circuit_count(
+    summaries: dict[tuple[str, str], dict[str, Any]],
+    *,
+    source_key: str,
+    status: SourceResultStatus,
+    count: int,
+) -> None:
+    key = (source_key, status.value)
+    item = summaries.get(key)
+    if item is not None:
+        item["short_circuited"] += count
+
+
+def _flush_problem_diagnostics(run_id: int, summaries: dict[tuple[str, str], dict[str, Any]]) -> None:
+    for item in summaries.values():
+        if item["short_circuited"]:
+            message = (
+                f"{item['source_key']} halted after {item['status']}; "
+                f"{item['short_circuited']} remaining task(s) were not attempted"
+            )
+        else:
+            message = f"{item['source_key']} produced {item['status']} for {item['observed_count']} task(s)"
+        db.add_diagnostic(
+            "WARNING",
+            message,
+            source_key=item["source_key"],
+            stage="research",
+            details={
+                "run_id": run_id,
+                "status": item["status"],
+                "observed_task_count": item["observed_count"],
+                "short_circuited_tasks": item["short_circuited"],
+                "sample_bidders": item["sample_bidders"],
+                "warnings": item["warnings"],
+            },
+        )
+    summaries.clear()
 
 
 def _honor_control_request(
@@ -90,10 +216,15 @@ def _honor_control_request(
     skipped: int,
     already_processed: int,
     proposal_count: int,
+    short_circuited: int = 0,
+    problem_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     action = requested_action(run_id)
     if action is None:
         return None
+
+    if problem_summaries:
+        _flush_problem_diagnostics(run_id, problem_summaries)
 
     executed = sum(status_counts.values())
     if action == PAUSE_REQUESTED:
@@ -125,6 +256,7 @@ def _honor_control_request(
         details={
             "run_id": run_id,
             "executed_this_pass": executed,
+            "short_circuited_this_pass": short_circuited,
             "proposal_count": proposal_count,
             "skipped_unimplemented": skipped,
             "already_processed": already_processed,
@@ -136,12 +268,17 @@ def _honor_control_request(
         skipped=skipped,
         already_processed=already_processed,
         proposal_count=proposal_count,
+        short_circuited=short_circuited,
     )
 
 
 def execute_research_run(run_id: int) -> dict[str, Any]:
     run = db.get_run(run_id)
-    if str(run["status"]) in {PAUSED, CANCELLED}:
+
+    # Completed/partial runs are terminal snapshots. Repeated calls to /execute must
+    # not silently re-run a leftover task. Explicit retry, fresh rerun, identity
+    # resolution, and resume flows all transition/create a non-terminal run first.
+    if str(run["status"]) in TERMINAL_RUN_STATUSES or str(run["status"]) == PAUSED:
         return _execution_payload(run_id)
 
     tasks = list_tasks(run_id)
@@ -152,6 +289,8 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
 
     status_counts: Counter[str] = Counter()
     proposal_count = 0
+    short_circuited = 0
+    problem_summaries: dict[tuple[str, str], dict[str, Any]] = {}
 
     controlled = _honor_control_request(
         run_id,
@@ -159,6 +298,8 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         skipped=len(skipped),
         already_processed=len(already_processed),
         proposal_count=proposal_count,
+        short_circuited=short_circuited,
+        problem_summaries=problem_summaries,
     )
     if controlled is not None:
         return controlled
@@ -197,6 +338,8 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             skipped=len(skipped),
             already_processed=len(already_processed),
             proposal_count=proposal_count,
+            short_circuited=short_circuited,
+            problem_summaries=problem_summaries,
         )
         if controlled is not None:
             return controlled
@@ -223,24 +366,32 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             skipped=len(skipped),
             already_processed=len(already_processed),
             proposal_count=proposal_count,
+            short_circuited=short_circuited,
+            problem_summaries=problem_summaries,
         )
         if controlled is not None:
             return controlled
 
+    halted_sources: set[str] = set()
     for task in executable:
+        source_key = str(task["source_key"])
+        if source_key in halted_sources:
+            continue
+
         controlled = _honor_control_request(
             run_id,
             status_counts=status_counts,
             skipped=len(skipped),
             already_processed=len(already_processed),
             proposal_count=proposal_count,
+            short_circuited=short_circuited,
+            problem_summaries=problem_summaries,
         )
         if controlled is not None:
             return controlled
 
         task_id = int(task["id"])
         bidder_id = int(task["bidder_id"])
-        source_key = str(task["source_key"])
         contractor = _contractor_context(bidder_id)
 
         if source_key in prepare_errors:
@@ -264,28 +415,34 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         status_counts[result.status.value] += 1
         proposal_count += len(persisted["proposal_ids"])
 
-        if result.status in {
-            SourceResultStatus.AUTH_REQUIRED,
-            SourceResultStatus.BLOCKED,
-            SourceResultStatus.HTTP_ERROR,
-            SourceResultStatus.SOURCE_UNAVAILABLE,
-            SourceResultStatus.DATASET_MALFORMED,
-            SourceResultStatus.LAYOUT_CHANGED,
-            SourceResultStatus.PARSER_FAILURE,
-            SourceResultStatus.TIMEOUT,
-        }:
-            db.add_diagnostic(
-                "WARNING",
-                f"{source_key} task completed with {result.status.value}",
+        if result.status in DIAGNOSTIC_PROBLEM_STATUSES:
+            _record_problem(
+                problem_summaries,
                 source_key=source_key,
+                status=result.status,
                 bidder_name=contractor.contractor_name,
-                stage="research",
-                details={
-                    "run_id": run_id,
-                    "task_id": task_id,
-                    "warnings": result.warnings,
-                },
+                warnings=result.warnings,
             )
+
+        # A preparation failure is necessarily source-wide. The explicit status set
+        # below covers live source/session/dataset failures observed during search.
+        source_wide_failure = source_key in prepare_errors or result.status in SOURCE_WIDE_FAILURE_STATUSES
+        if source_wide_failure:
+            unattempted = _note_unattempted_source_tasks(
+                run_id,
+                source_key,
+                result.status,
+                result.warnings,
+            )
+            if unattempted:
+                halted_sources.add(source_key)
+                short_circuited += unattempted
+                _add_short_circuit_count(
+                    problem_summaries,
+                    source_key=source_key,
+                    status=result.status,
+                    count=unattempted,
+                )
 
         # Pause/stop is cooperative: a source request already in flight is allowed to
         # return and persist its evidence, then the executor exits before starting the
@@ -296,6 +453,8 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             skipped=len(skipped),
             already_processed=len(already_processed),
             proposal_count=proposal_count,
+            short_circuited=short_circuited,
+            problem_summaries=problem_summaries,
         )
         if controlled is not None:
             return controlled
@@ -306,6 +465,8 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         skipped=len(skipped),
         already_processed=len(already_processed),
         proposal_count=proposal_count,
+        short_circuited=short_circuited,
+        problem_summaries=problem_summaries,
     )
     if controlled is not None:
         return controlled
@@ -337,9 +498,11 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
     status_summary = ", ".join(f"{key}={value}" for key, value in sorted(cumulative_counts.items())) or "no tasks"
     message = (
         f"Run has {len(final_tasks) - cumulative_pending}/{len(final_tasks)} task(s) processed; "
+        f"{short_circuited} task(s) were not attempted after source-wide failures; "
         f"{proposal_count} proposed change(s) created in this pass. {status_summary}"
     )
     _set_run_status(run_id, final_status, message, completed=True)
+    _flush_problem_diagnostics(run_id, problem_summaries)
     db.add_diagnostic(
         "INFO" if final_status == "completed" else "WARNING",
         "Research run execution finished",
@@ -349,6 +512,7 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             "status": final_status,
             "status_counts": dict(cumulative_counts),
             "executed_this_pass": sum(status_counts.values()),
+            "short_circuited_this_pass": short_circuited,
             "proposal_count_this_pass": proposal_count,
             "skipped_unimplemented": len(skipped),
             "already_processed": len(already_processed),
@@ -360,4 +524,5 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         skipped=len(skipped),
         already_processed=len(already_processed),
         proposal_count=proposal_count,
+        short_circuited=short_circuited,
     )
