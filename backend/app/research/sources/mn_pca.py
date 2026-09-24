@@ -24,10 +24,29 @@ FUZZY_REVIEW_THRESHOLD = 94.0
 TOKEN_SUBSET_REVIEW_THRESHOLD = 100.0
 TOKEN_SUBSET_MIN_TOKENS = 2
 
-NAME_HEADERS = ("company or individual(s)", "company or individual", "regulated party", "company", "facility name")
+NAME_HEADERS = (
+    "company or individual(s)",
+    "company or individual(s) (location)",
+    "company or individual",
+    "company or individuals",
+    "company or individuals (location)",
+    "regulated party",
+    "regulated party name",
+    "regulated party/company",
+    "company",
+    "facility name",
+)
 DATE_HEADERS = ("public date", "date", "closed date")
 LOCATION_HEADERS = ("violation location", "location", "city")
-VIOLATION_HEADERS = ("violation", "violation description", "violation information", "category")
+VIOLATION_HEADERS = (
+    "violation",
+    "violation(s)",
+    "violations",
+    "violation description",
+    "violation(s) description",
+    "violation information",
+    "category",
+)
 PENALTY_HEADERS = ("net penalty", "penalty", "penalty amount")
 CASE_HEADERS = ("case type", "enforcement action", "action type")
 
@@ -129,8 +148,8 @@ def _should_review_name_variant(approved_name: str, candidate_name: str, wratio:
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.0.1"
-    parser_version = "1.0.0"
+    adapter_version = "1.0.2"
+    parser_version = "1.0.1"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
         self.client = client or httpx.Client(timeout=TIMEOUT_SECONDS, follow_redirects=True, headers={"User-Agent": USER_AGENT})

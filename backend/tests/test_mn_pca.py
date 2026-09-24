@@ -13,6 +13,10 @@ Acme Construction LLC,03/05/2026,Minneapolis,Construction stormwater,$9663,Admin
 Other Builder Inc,01/10/2025,St Paul,Hazardous waste,$1200,Administrative penalty order
 """
 
+CURRENT_HEADER_VARIANT_CSV = """Company or individual(s) (location),Public date,Violation location,Violation(s),Net penalty,Case type
+Acme Construction LLC,03/05/2026,Minneapolis,Construction stormwater,$9663,Administrative penalty order
+"""
+
 
 def contractor(*, name: str = "Acme Construction, LLC", related: str = "") -> ContractorContext:
     return ContractorContext(internal_id=7, external_id="B-7", contractor_name=name, related_companies=related, city="Minneapolis", state="MN")
@@ -28,6 +32,15 @@ def source_for(body: str = CSV, status: int = 200, content_type: str = "text/csv
 def test_parser_validates_and_reads_official_export_shape():
     records, digest = parse_mpca_csv(CSV)
     assert len(records) == 2
+    assert records[0].party == "Acme Construction LLC"
+    assert records[0].violation == "Construction stormwater"
+    assert records[0].penalty == "$9663"
+    assert len(digest) == 64
+
+
+def test_parser_accepts_current_mpca_header_variants():
+    records, digest = parse_mpca_csv(CURRENT_HEADER_VARIANT_CSV)
+    assert len(records) == 1
     assert records[0].party == "Acme Construction LLC"
     assert records[0].violation == "Construction stormwater"
     assert records[0].penalty == "$9663"
