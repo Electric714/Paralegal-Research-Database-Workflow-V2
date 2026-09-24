@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import date
+from types import SimpleNamespace
+
+import app.research.sources.runtime_status_adapters as runtime_adapters
 from app.research.models import (
     CompletenessStatus,
     EvidenceRecord,
@@ -45,6 +49,24 @@ def partial_result(source_key: str, *, identity_status=IdentityStatus.NOT_EVALUA
 def test_registry_uses_operational_status_adapters():
     assert SOURCE_ADAPTERS["sam"] is OperationalSamUploadedExclusionsSource
     assert SOURCE_ADAPTERS["wisdot"] is OperationalWisdotContractorSource
+
+
+def test_sam_freshness_uses_operator_local_calendar_date(monkeypatch):
+    monkeypatch.setattr(SamUploadedExclusionsSource, "prepare", lambda self: None)
+
+    monkeypatch.setattr(runtime_adapters, "_local_calendar_date", lambda: date(2026, 9, 23))
+    fresh_source = OperationalSamUploadedExclusionsSource()
+    fresh_source.dataset = SimpleNamespace(extract_date=date(2026, 9, 21))
+    fresh_source.prepare()
+    assert fresh_source.today == date(2026, 9, 23)
+    assert fresh_source.dataset_is_fresh is True
+
+    monkeypatch.setattr(runtime_adapters, "_local_calendar_date", lambda: date(2026, 9, 24))
+    stale_source = OperationalSamUploadedExclusionsSource()
+    stale_source.dataset = SimpleNamespace(extract_date=date(2026, 9, 21))
+    stale_source.prepare()
+    assert stale_source.today == date(2026, 9, 24)
+    assert stale_source.dataset_is_fresh is False
 
 
 def test_sam_usable_stale_no_match_reports_success_without_becoming_clean_negative(monkeypatch):
