@@ -44,6 +44,7 @@ _CLOSED_12M_RE = re.compile(
     r"\b([\d,]+)\s+complaints?\s+closed\s+in\s+the\s+last\s+12\s+months?\b",
     re.IGNORECASE,
 )
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]*)?\(?\d{3}\)?[\s.-]+\d{3}[\s.-]+\d{4}(?!\d)")
 
 
 class BbbReaderError(RuntimeError):
@@ -105,6 +106,7 @@ def parse_search_profiles(text: str) -> tuple[list[BbbProfile], int | None]:
         next_start = matches[index + 1].start() if index + 1 < len(matches) else len(text or "")
         block_end = min(next_start, match.end() + 1200)
         block = plain_markdown((text or "")[match.end():block_end])
+        block = " ".join(_PHONE_RE.sub(" ", block).split())
         location = _parse_location(block)
 
         path_match = _SEARCH_PROFILE_PATH.match(urlsplit(canonical).path)
