@@ -7,11 +7,13 @@ from .sources.mn_debarment import MinnesotaDebarredVendorsSource
 from .sources.mn_pca import MinnesotaPcaEnforcementSource
 from .sources.osha_resilient import ResilientOshaEstablishmentSource
 from .sources.responsible_mn import ResponsibleMinnesotaSource
-from .sources.sam_uploaded import SamUploadedExclusionsSource
+from .sources.runtime_status_adapters import (
+    OperationalSamUploadedExclusionsSource,
+    OperationalWisdotContractorSource,
+)
 from .sources.violation_tracker import ViolationTrackerSource
 from .sources.wcca import WccaOperatorAssistedSource
 from .sources.wdfi import WdfiCorporateRecordsSource
-from .sources.wisdot import WisdotContractorSource
 
 
 SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
@@ -21,11 +23,11 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "mn_pca": MinnesotaPcaEnforcementSource,
     "osha": ResilientOshaEstablishmentSource,
     "responsible_mn": ResponsibleMinnesotaSource,
-    "sam": SamUploadedExclusionsSource,
+    "sam": OperationalSamUploadedExclusionsSource,
     "violation_tracker": ViolationTrackerSource,
     "wcca": WccaOperatorAssistedSource,
     "wdfi": WdfiCorporateRecordsSource,
-    "wisdot": WisdotContractorSource,
+    "wisdot": OperationalWisdotContractorSource,
 }
 
 
