@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlsplit
 
@@ -51,9 +52,11 @@ class BrowserFetchResult:
 class PublicBrowserSession:
     """Small, conservative Playwright session for public-record GET fallbacks.
 
-    It does not synthesize challenge answers, solve CAPTCHAs, mutate cookies, or
-    retry explicit HTTP 429 rate limits. Its purpose is simply to use the same
-    browser stack a person uses when a public site rejects a bare HTTP client.
+    It does not synthesize challenge answers, solve CAPTCHAs, or retry explicit
+    HTTP 429 rate limits. A caller can opt into a headed browser and an
+    application-owned persistent profile when the public site behaves differently
+    from a background/headless browser. Persistent profiles only preserve normal
+    browser state (cookies/local storage) between runs.
     """
 
     def __init__(
@@ -62,10 +65,16 @@ class PublicBrowserSession:
         allowed_hosts: Iterable[str],
         warmup_url: str | None = None,
         timeout_ms: int = 45_000,
+        headless: bool = True,
+        profile_dir: str | None = None,
+        blocked_retry_wait_ms: int = 0,
     ) -> None:
         self.allowed_hosts = {host.casefold().rstrip(".") for host in allowed_hosts}
         self.warmup_url = warmup_url
         self.timeout_ms = timeout_ms
+        self.headless = headless
+        self.profile_dir = profile_dir
+        self.blocked_retry_wait_ms = max(0, int(blocked_retry_wait_ms))
         self._playwright = None
         self._browser = None
         self._context = None
@@ -79,7 +88,7 @@ class PublicBrowserSession:
             raise BrowserFetchError(f"Browser fallback refused URL outside the allowed public host set: {url}")
 
     def _launch(self) -> None:
-        if self._browser is not None:
+        if self._context is not None:
             return
         try:
             from playwright.sync_api import sync_playwright
@@ -88,9 +97,45 @@ class PublicBrowserSession:
 
         self._playwright = sync_playwright().start()
         launch_errors: list[str] = []
+
+        if self.profile_dir:
+            profile_path = Path(self.profile_dir).expanduser()
+            profile_path.mkdir(parents=True, exist_ok=True)
+            for channel in ("msedge", "chrome"):
+                try:
+                    self._context = self._playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_path),
+                        channel=channel,
+                        headless=self.headless,
+                        locale="en-US",
+                    )
+                    break
+                except Exception as exc:  # pragma: no cover - depends on local browser install
+                    launch_errors.append(f"{channel}: {exc}")
+
+            if self._context is None:
+                try:
+                    self._context = self._playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_path),
+                        headless=self.headless,
+                        locale="en-US",
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local browser install
+                    launch_errors.append(f"chromium: {exc}")
+                    self.close()
+                    raise BrowserUnavailableError(
+                        "No usable Chromium-family browser was available for the public-site browser session. "
+                        "Microsoft Edge is expected on the supported Windows workstation. "
+                        + " | ".join(launch_errors)
+                    ) from exc
+
+            pages = list(self._context.pages)
+            self._page = pages[0] if pages else self._context.new_page()
+            return
+
         for channel in ("msedge", "chrome"):
             try:
-                self._browser = self._playwright.chromium.launch(channel=channel, headless=True)
+                self._browser = self._playwright.chromium.launch(channel=channel, headless=self.headless)
                 break
             except Exception as exc:  # pragma: no cover - depends on local browser install
                 launch_errors.append(f"{channel}: {exc}")
@@ -99,12 +144,12 @@ class PublicBrowserSession:
             try:
                 # This works when the Playwright-managed Chromium runtime has already
                 # been installed (for example by a developer or a future launcher).
-                self._browser = self._playwright.chromium.launch(headless=True)
+                self._browser = self._playwright.chromium.launch(headless=self.headless)
             except Exception as exc:  # pragma: no cover - depends on local browser install
                 launch_errors.append(f"chromium: {exc}")
                 self.close()
                 raise BrowserUnavailableError(
-                    "No usable Chromium-family browser was available for the public-site fallback. "
+                    "No usable Chromium-family browser was available for the public-site browser session. "
                     "Microsoft Edge is expected on the supported Windows workstation. "
                     + " | ".join(launch_errors)
                 ) from exc
@@ -124,12 +169,36 @@ class PublicBrowserSession:
         except Exception:
             pass
 
+    def _body_text(self) -> str:
+        if self._page is None:
+            return ""
+        try:
+            return self._page.locator("body").inner_text(timeout=5_000)
+        except Exception:
+            return ""
+
     def _raise_if_challenge_text(self, text: str) -> None:
         match = CHALLENGE_RE.search(text or "")
         if match:
             raise BrowserBlockedError(
                 f"Public site presented an interactive security challenge: {match.group(0)!r}."
             )
+
+    def _reload_after_block_wait(self) -> int | None:
+        """Give normal site JavaScript/cookies one chance to settle, then reload.
+
+        This deliberately does not click, answer, or solve any challenge. It merely
+        allows a headed browser a short grace period before one ordinary reload.
+        """
+        if self._page is None or self.blocked_retry_wait_ms <= 0:
+            return None
+        try:
+            self._page.wait_for_timeout(self.blocked_retry_wait_ms)
+            response = self._page.reload(wait_until="domcontentloaded", timeout=self.timeout_ms)
+            self._settle()
+            return response.status if response is not None else 200
+        except Exception:
+            return None
 
     def _warm(self) -> None:
         if self._warmed or not self.warmup_url:
@@ -146,14 +215,20 @@ class PublicBrowserSession:
         except Exception as exc:
             raise BrowserFetchError(f"Browser warm-up failed: {exc}") from exc
         self._settle()
-        if response is not None and response.status in {401, 403, 429}:
-            raise BrowserBlockedError(
-                f"Public-site browser warm-up returned HTTP {response.status}."
-            )
-        try:
-            body_text = self._page.locator("body").inner_text(timeout=5_000)
-        except Exception:
-            body_text = ""
+        status = response.status if response is not None else 200
+        if status == 429:
+            raise BrowserBlockedError("Public-site browser warm-up returned HTTP 429.")
+        if status in {401, 403}:
+            retried = self._reload_after_block_wait()
+            if retried is not None:
+                status = retried
+        if status in {401, 403, 429}:
+            raise BrowserBlockedError(f"Public-site browser warm-up returned HTTP {status}.")
+        body_text = self._body_text()
+        if CHALLENGE_RE.search(body_text) and self.blocked_retry_wait_ms:
+            retried = self._reload_after_block_wait()
+            if retried is not None and retried < 400:
+                body_text = self._body_text()
         self._raise_if_challenge_text(body_text)
         self._warmed = True
 
@@ -165,17 +240,25 @@ class PublicBrowserSession:
         try:
             response = self._page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         except Exception as exc:
-            raise BrowserFetchError(f"Browser navigation failed: {exc}") from exc
+            raise BrowserFetchError(f"Browser navigation failed for {url}: {exc}") from exc
         self._settle()
         status = response.status if response is not None else 200
+        if status == 429:
+            raise BrowserBlockedError(f"Public-site browser request returned HTTP 429 for {url}.")
+        if status in {401, 403}:
+            retried = self._reload_after_block_wait()
+            if retried is not None:
+                status = retried
         if status in {401, 403, 429}:
-            raise BrowserBlockedError(f"Public-site browser request returned HTTP {status}.")
+            raise BrowserBlockedError(f"Public-site browser request returned HTTP {status} for {url}.")
         if status >= 400:
-            raise BrowserFetchError(f"Public-site browser request returned HTTP {status}.")
-        try:
-            body_text = self._page.locator("body").inner_text(timeout=5_000)
-        except Exception:
-            body_text = ""
+            raise BrowserFetchError(f"Public-site browser request returned HTTP {status} for {url}.")
+        body_text = self._body_text()
+        if CHALLENGE_RE.search(body_text) and self.blocked_retry_wait_ms:
+            retried = self._reload_after_block_wait()
+            if retried is not None and retried < 400:
+                status = retried
+                body_text = self._body_text()
         self._raise_if_challenge_text(body_text)
         return BrowserFetchResult(
             text=self._page.content(),
@@ -194,14 +277,14 @@ class PublicBrowserSession:
         try:
             response = self._context.request.get(url, headers=headers, timeout=self.timeout_ms)
         except Exception as exc:
-            raise BrowserFetchError(f"Browser-context resource request failed: {exc}") from exc
+            raise BrowserFetchError(f"Browser-context resource request failed for {url}: {exc}") from exc
         if response.status in {401, 403, 429}:
             raise BrowserBlockedError(
-                f"Public-site browser-context request returned HTTP {response.status}."
+                f"Public-site browser-context request returned HTTP {response.status} for {url}."
             )
         if response.status >= 400:
             raise BrowserFetchError(
-                f"Public-site browser-context request returned HTTP {response.status}."
+                f"Public-site browser-context request returned HTTP {response.status} for {url}."
             )
         text = response.text()
         self._raise_if_challenge_text(text)
@@ -214,6 +297,8 @@ class PublicBrowserSession:
         )
 
     def close(self) -> None:
+        # A persistent context owns its browser process, so closing the context is
+        # sufficient. A normal context/browser pair needs both calls.
         for item in (self._context, self._browser):
             if item is None:
                 continue
