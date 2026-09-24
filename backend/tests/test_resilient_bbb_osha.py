@@ -4,6 +4,7 @@ from datetime import date
 
 import httpx
 
+from app import database as db
 from app.research.models import SourceResultStatus
 from app.research.source_registry import SOURCE_ADAPTERS
 from app.research.sources.base import ContractorContext
@@ -124,8 +125,13 @@ def test_osha_http_403_falls_back_to_browser_without_becoming_blocked():
     assert FakeBrowserSession.instances[0].closed is True
 
 
-def test_bbb_http_403_falls_back_to_browser_for_sitemaps_profile_and_complaints():
+def test_bbb_http_403_falls_back_to_browser_for_sitemaps_profile_and_complaints(tmp_path, monkeypatch):
     FakeBrowserSession.instances.clear()
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(db, "DATA_DIR", data_dir)
+    monkeypatch.setattr(db, "IMPORT_DIR", data_dir / "imports")
+    monkeypatch.setattr(db, "DB_PATH", data_dir / "test.db")
+    db.init_db()
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, text="Access denied", request=request)
