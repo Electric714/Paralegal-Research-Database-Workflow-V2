@@ -23,7 +23,7 @@ JINA_READER_BASE = "https://r.jina.ai/"
 BBB_HOSTS = {"bbb.org", "www.bbb.org"}
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _SEARCH_PROFILE_PATH = re.compile(
-    r"^/us/[a-z]{2}/[^/]+/profile/[^/]+/[^/?#]+(?:/addressId/\d+)?/?$",
+    r"^/us/(?P<state>[a-z]{2})/(?P<city>[^/]+)/profile/[^/]+/[^/?#]+(?:/addressId/\d+)?/?$",
     re.IGNORECASE,
 )
 _PROFILE_LINK_RE = re.compile(
