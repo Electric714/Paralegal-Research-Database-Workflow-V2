@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from datetime import date
+
 from ..models import CompletenessStatus, IdentityStatus, SourceResultStatus
 from .base import ContractorContext
 from .sam_uploaded import SamUploadedExclusionsSource
 from .wisdot import WisdotContractorSource
+
+
+def _local_calendar_date() -> date:
+    """Return the operator machine's calendar date for local desktop freshness checks."""
+    return date.today()
 
 
 class OperationalSamUploadedExclusionsSource(SamUploadedExclusionsSource):
@@ -12,9 +19,18 @@ class OperationalSamUploadedExclusionsSource(SamUploadedExclusionsSource):
     A usable uploaded extract can still be incomplete/stale evidence. Keep
     ``completeness_status=PARTIAL`` so a no-match is never a clean negative, but do
     not mislabel every successfully executed bidder lookup as ``PARTIAL_RESULTS``.
+
+    The app is a local desktop workflow, so freshness follows the operator machine's
+    calendar date. This avoids an uploaded extract becoming stale several hours early
+    in U.S. time zones merely because UTC crossed midnight.
     """
 
-    adapter_version = "1.6.0"
+    adapter_version = "1.6.1"
+
+    def prepare(self) -> None:
+        if self.today is None:
+            self.today = _local_calendar_date()
+        super().prepare()
 
     def search(self, contractor: ContractorContext):
         result = super().search(contractor)
