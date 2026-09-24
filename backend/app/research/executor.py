@@ -412,7 +412,6 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
                 )
 
         persisted = persist_source_result(task_id, result)
-        executed_count += 1
         status_counts[result.status.value] += 1
         proposal_count += len(persisted["proposal_ids"])
 
@@ -480,7 +479,6 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
         SourceResultStatus.DATASET_MALFORMED.value,
         SourceResultStatus.LAYOUT_CHANGED.value,
         SourceResultStatus.PARSER_FAILURE.value,
-        SourceResultStatus.SESSION_EXPIRED.value,
         SourceResultStatus.TIMEOUT.value,
         SourceResultStatus.PARTIAL_RESULTS.value,
         SourceResultStatus.AMBIGUOUS_MATCH.value,
@@ -518,8 +516,6 @@ def execute_research_run(run_id: int) -> dict[str, Any]:
             "proposal_count_this_pass": proposal_count,
             "skipped_unimplemented": len(skipped),
             "already_processed": len(already_processed),
-            "adapter_requests": executed_count,
-            "short_circuited_tasks": short_circuited_count,
         },
     )
     return _execution_payload(
