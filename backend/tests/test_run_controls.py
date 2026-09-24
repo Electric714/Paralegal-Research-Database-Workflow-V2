@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from app import database as db
-from app.research import executor
+from app.research import executor, run_control
 from app.research.models import CompletenessStatus, IdentityStatus, SourceResult, SourceResultStatus
 from app.research.run_control import prepare_resume, request_pause, request_stop
 from app.research.service import list_tasks
@@ -102,6 +100,7 @@ def test_stop_cancels_run_and_leaves_remaining_tasks_unchecked(isolated_db, monk
     result = executor.execute_research_run(run_id)
     assert result["run"]["status"] == "cancelled"
     assert result["executed"] == 1
+    assert "cancelled" not in result
     statuses = [task["status"] for task in list_tasks(run_id)]
     assert statuses.count(SourceResultStatus.SUCCESS_NO_MATCH.value) == 1
     assert statuses.count(SourceResultStatus.NOT_CHECKED.value) == 1
@@ -109,7 +108,19 @@ def test_stop_cancels_run_and_leaves_remaining_tasks_unchecked(isolated_db, monk
     # A stopped run is terminal; a stray execute call must not restart it.
     again = executor.execute_research_run(run_id)
     assert again["run"]["status"] == "cancelled"
+    assert again["executed"] == 0
+    assert "cancelled" not in again
     assert state["calls"] == 1
+
+
+def test_pause_stop_resume_is_the_only_run_control_contract():
+    # The superseded implementation exposed request_cancel() and a separate
+    # execution["cancelled"] boolean. The current design uses explicit
+    # pause/stop/resume commands and run.status as the single source of truth.
+    assert hasattr(run_control, "request_pause")
+    assert hasattr(run_control, "request_stop")
+    assert hasattr(run_control, "prepare_resume")
+    assert not hasattr(run_control, "request_cancel")
 
 
 def test_run_control_routes_are_registered():
