@@ -175,8 +175,21 @@ def _extract_pdf_text(data: bytes) -> str:
 
 
 def _validate_layout(key: str, text: str) -> None:
+    if key == "debarment":
+        folded = text.casefold()
+        missing: list[str] = []
+        if "contractor" not in folded or not any(token in folded for token in ("debarred", "suspended", "ineligible")):
+            missing.append("contractor/action title")
+        if not re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", text):
+            missing.append("dated contractor row")
+        if missing:
+            raise WisdotDatasetError(
+                f"WisDOT {key} PDF layout is missing expected marker(s): {', '.join(missing)}",
+                status=SourceResultStatus.LAYOUT_CHANGED,
+            )
+        return
+
     required = {
-        "debarment": ("Debarred", "Name of Contractor", "Acting Agency"),
         "all_contractors": ("All Contractors", "Vendor Name & Address"),
         "prequalified": ("Prequalified Contractors", "Vendor Name & Address"),
         "finals_status": ("Finals Status After Actual Completion", "Contract ID", "Contractor"),
@@ -258,48 +271,179 @@ def _location_parts(value: str) -> tuple[str, str, str]:
     return match.group("city").strip(" ,"), match.group("state"), match.group("zip")
 
 
+_DEBARMENT_ROW_RE = re.compile(
+    r"(?P<effective>\d{1,2}/\d{1,2}/\d{2,4})\s+"
+    r"(?P<termination>\d{1,2}/\d{1,2}/\d{2,4}|Indefinite)\s+"
+    r"(?P<action>Debarment|Suspended|Ineligible)\s+"
+    r"(?P<area>\S+)"
+    r"(?:\s+(?P<agency>WisDOT|WisDWD|FHWA|GSA|AF|[A-Z][A-Za-z0-9&./-]*))?"
+    r"(?:\s+(?P<cause>\d[\d,\s]*))?\s*$",
+    re.IGNORECASE,
+)
+_DEBARMENT_HEADER_WORDS = {
+    "name",
+    "of",
+    "contractor",
+    "address",
+    "effective",
+    "date",
+    "termination",
+    "action",
+    "restricted",
+    "area",
+    "acting",
+    "agency",
+    "cause",
+    "code",
+}
+_DEBARMENT_NOISE_EXACT = {
+    "debarred contractors",
+    "suspended contractors",
+    "ineligible contractors",
+    "to:",
+    "date:",
+    "subject:",
+    "from:",
+}
+_DEBARMENT_NOISE_MARKERS = (
+    "prepared and issued",
+    "list of debarred",
+    "wisdot cause codes",
+    "wisdwd cause codes",
+    "correspondence/memorandum",
+    "revisions from list",
+    "the following have been",
+    "region project development chiefs",
+    "chief proposal management engineer",
+)
+_DEBARMENT_ADDRESS_HINT_RE = re.compile(
+    r"\b(?:road|rd\.?|street|st\.?|avenue|ave\.?|boulevard|blvd\.?|lane|ln\.?|"
+    r"drive|dr\.?|trail|trl\.?|place|pl\.?|court|ct\.?|parkway|pkwy\.?|"
+    r"highway|hwy\.?|route|rte\.?|suite|ste\.?|building|bldg\.?|factory|"
+    r"district|base|plant|project|area|no\.)\b",
+    re.IGNORECASE,
+)
+_DEBARMENT_MIXED_NAME_ADDRESS_RE = re.compile(
+    r"^(?P<name>.+?)\s+(?P<address>(?:\d{1,6}[A-Za-z-]*|[NSEW]\d{2,6}[A-Za-z-]*)\s+.+)$",
+    re.IGNORECASE,
+)
+_DEBARMENT_FOREIGN_LOCATION_RE = re.compile(
+    r",\s*(?:china|chn|hkg|hong kong|usa|u\.s\.a\.|canada|mexico)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_debarment_noise(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    if not normalized:
+        return True
+    folded = normalized.casefold()
+    if folded in _DEBARMENT_NOISE_EXACT:
+        return True
+    if any(marker in folded for marker in _DEBARMENT_NOISE_MARKERS):
+        return True
+    words = set(re.findall(r"[a-z]+", folded))
+    return bool(words and words <= _DEBARMENT_HEADER_WORDS)
+
+
+def _looks_like_debarment_location(value: str) -> bool:
+    _city, state, zip_code = _location_parts(value)
+    if state and zip_code:
+        return True
+    return bool(_DEBARMENT_FOREIGN_LOCATION_RE.search(value.strip()))
+
+
+def _looks_like_debarment_address(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if re.match(r"^(?:\d{1,6}[A-Za-z-]*|[NSEW]\d{2,6}[A-Za-z-]*)\b", text, flags=re.IGNORECASE):
+        return True
+    return bool(_DEBARMENT_ADDRESS_HINT_RE.search(text) and re.search(r"\d", text))
+
+
+def _debarment_identity(lines: list[str]) -> tuple[str, str, str, str, str]:
+    segments: list[str] = []
+    for line in lines:
+        for part in re.split(r"\s{2,}", line.strip()):
+            cleaned = re.sub(r"\s+", " ", part).strip()
+            if cleaned and not _is_debarment_noise(cleaned):
+                segments.append(cleaned)
+
+    city = state = zip_code = ""
+    for segment in segments:
+        loc_city, loc_state, loc_zip = _location_parts(segment)
+        if loc_state and loc_zip:
+            city, state, zip_code = loc_city, loc_state, loc_zip
+
+    name_parts: list[str] = []
+    address_parts: list[str] = []
+    for segment in segments:
+        if _looks_like_debarment_location(segment):
+            continue
+
+        mixed = _DEBARMENT_MIXED_NAME_ADDRESS_RE.match(segment)
+        if mixed:
+            name_part = mixed.group("name").strip(" ,-")
+            address_part = mixed.group("address").strip(" ,-")
+            if name_part:
+                name_parts.append(name_part)
+            if address_part:
+                address_parts.append(address_part)
+            continue
+
+        if _looks_like_debarment_address(segment):
+            address_parts.append(segment)
+            continue
+
+        if address_parts and _DEBARMENT_ADDRESS_HINT_RE.search(segment):
+            address_parts.append(segment)
+            continue
+
+        name_parts.append(segment)
+
+    return (
+        " ".join(name_parts).strip(" ,-"),
+        " ".join(address_parts).strip(" ,-"),
+        city,
+        state,
+        zip_code,
+    )
+
+
 def parse_debarment_text(text: str) -> list[DebarmentRecord]:
     lines = [re.sub(r"\s+$", "", line) for line in text.splitlines()]
-    row_re = re.compile(
-        r"(?P<effective>\d{1,2}/\d{1,2}/\d{2,4})\s+"
-        r"(?P<termination>\d{1,2}/\d{1,2}/\d{2,4}|Indefinite)\s+"
-        r"(?P<action>Debarment|Suspended|Ineligible)\s+"
-        r"(?P<area>\S+)\s*(?P<agency>WisDOT|WisDWD|FHWA|GSA|AF|[A-Z][A-Za-z0-9&./-]*)?\s*"
-        r"(?P<cause>[0-9, ]*)$",
-        re.IGNORECASE,
-    )
     records: list[DebarmentRecord] = []
+    block_start = 0
+    index = 0
 
-    for index, line in enumerate(lines):
-        match = row_re.search(line.strip())
-        if not match:
+    while index < len(lines):
+        if not re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", lines[index]):
+            index += 1
             continue
-        prefix = line[: match.start()].strip()
-        context = [line]
-        if index > 0:
-            context.insert(0, lines[index - 1])
-        if index > 1:
-            context.insert(0, lines[index - 2])
-        chunks = [chunk.strip() for chunk in re.split(r"\s{2,}", prefix) if chunk.strip()]
-        name = chunks[0] if chunks else ""
-        address = chunks[1] if len(chunks) > 1 else ""
-        if not name:
-            for prior in reversed(context[:-1]):
-                candidate = prior.strip()
-                if candidate and not any(
-                    marker in candidate.casefold()
-                    for marker in ("name of contractor", "prepared and issued", "cause code", "contractors")
-                ):
-                    name = candidate
-                    break
-        combined = " ".join(item.strip() for item in context if item.strip())
-        city, state, zip_code = _location_parts(combined)
-        if not address:
-            for prior in reversed(context[:-1]):
-                candidate = prior.strip()
-                if re.search(r"\d", candidate) and candidate != name:
-                    address = candidate
-                    break
+
+        match: re.Match[str] | None = None
+        candidate = ""
+        width = 0
+        for candidate_width in range(1, min(3, len(lines) - index) + 1):
+            candidate = " ".join(
+                item.strip() for item in lines[index : index + candidate_width] if item.strip()
+            )
+            match = _DEBARMENT_ROW_RE.search(candidate)
+            if match:
+                width = candidate_width
+                break
+
+        if match is None:
+            index += 1
+            continue
+
+        prefix = candidate[: match.start()].strip()
+        context = list(lines[block_start:index])
+        if prefix:
+            context.append(prefix)
+        name, address, city, state, zip_code = _debarment_identity(context)
+
         if name:
             records.append(
                 DebarmentRecord(
@@ -316,6 +460,10 @@ def parse_debarment_text(text: str) -> list[DebarmentRecord]:
                     cause_code=(match.group("cause") or "").strip(),
                 )
             )
+
+        block_start = index + width
+        index += width
+
     if not records:
         raise WisdotDatasetError(
             "WisDOT debarment PDF was recognized but no contractor rows could be parsed.",
@@ -498,7 +646,7 @@ class WisdotContractorSource(ResearchSource):
     source_key = "wisdot"
     display_name = "Wisconsin DOT Contractor Information"
     adapter_version = "1.1.0"
-    parser_version = "1.1.0"
+    parser_version = "1.2.0"
 
     def __init__(
         self,
