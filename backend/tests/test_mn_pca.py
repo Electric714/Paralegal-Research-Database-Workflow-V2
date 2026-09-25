@@ -56,6 +56,15 @@ def test_missing_required_columns_fails_closed():
         raise AssertionError("expected MpcaDatasetError")
 
 
+def test_captcha_is_reported_as_blocked_not_a_parser_failure():
+    source = source_for('<!DOCTYPE html><html><title>Radware Captcha Page</title></html>', content_type='text/html')
+    result = source.search(contractor())
+    assert result.status == SourceResultStatus.BLOCKED
+    assert result.completeness_status == CompletenessStatus.UNKNOWN
+    assert result.evidence == []
+    assert 'human verification' in result.warnings[0]
+
+
 def test_exact_normalized_name_is_confirmed_and_proposes_environmental_violation():
     result = source_for().search(contractor())
     assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS

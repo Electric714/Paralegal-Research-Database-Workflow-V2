@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+
+def test_bbb_reader_complaints_after_long_navigation():
+    from app.research.sources.bbb_reader import parse_complaint_summary
+    page = 'Title: Example Business Complaints\n' + ('Navigation menu link ' * 250)
+    page += '\n# Complaints\n\nThis business has 0 complaints\n'
+    assert parse_complaint_summary(page) == (0, None)
+
 from datetime import date
 from urllib.parse import parse_qs, urlsplit
 

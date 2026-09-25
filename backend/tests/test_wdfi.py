@@ -122,6 +122,16 @@ def test_exact_name_and_location_confirm_active_wi_entity(isolated_db):
     assert result.normalized_payload["selected_record"]["city"] == "MADISON"
 
 
+def test_live_address_with_separate_city_comma_state_and_zip_lines(isolated_db):
+    # Live DFI pages separate these spans with newlines, unlike the old fixture.
+    source = make_source(city='MADISON\n,\nWI\n53703\nUnited States of America', state='', zip_code='')
+    result = source.search(context())
+    assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
+    record = result.normalized_payload['selected_record']
+    assert record['address_1'] == '123 MAIN ST'
+    assert (record['city'], record['state'], record['zip_code']) == ('MADISON', 'WI', '53703')
+
+
 def test_legacy_adverse_status_format_is_preserved_when_semantically_same(isolated_db):
     source = make_source(status="Delinquent", status_date="10/01/2024")
     result = source.search(context(dfi="Delinquent as of 10/1/24"))

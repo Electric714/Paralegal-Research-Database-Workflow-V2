@@ -131,3 +131,22 @@ def test_run_control_routes_are_registered():
     assert "/api/runs/{run_id}/stop" in paths
     assert "/api/runs/{run_id}/resume" in paths
     assert "/api/runs/{run_id}/diagnostics/export" in paths
+
+
+@pytest.mark.parametrize('status', ['SESSION_EXPIRED', 'PAGINATION_INCOMPLETE'])
+def test_diagnostics_exports_all_blocked_and_partial_tasks(isolated_db, status):
+    from fastapi.testclient import TestClient
+    from app.main_with_wcca import app
+    from app.research.service import create_tasks_for_run
+
+    run_id = db.create_run(None, ['fake'], 2)['id']
+    create_tasks_for_run(run_id, db.active_bidder_ids(), ['fake'])
+    with db.connect() as conn:
+        conn.execute('UPDATE research_tasks SET status=? WHERE research_run_id=?', (status, run_id))
+    with TestClient(app) as client:
+        response = client.get(f'/api/runs/{run_id}/diagnostics/export')
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['summary']['attention_tasks'] == 2
+    assert len(payload['problematic_tasks']) == 2
+    assert {task['status'] for task in payload['problematic_tasks']} == {status}

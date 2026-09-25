@@ -1,3 +1,5 @@
+param([switch]$SetupOnly, [switch]$NoBrowser)
+
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -116,11 +118,20 @@ $env:UV_PYTHON_BIN_DIR = $PythonBinDir
 $env:UV_PYTHON_NO_REGISTRY = '1'
 $env:UV_MANAGED_PYTHON = '1'
 
-if (-not (Test-Path $VenvPython)) {
+$PythonWorks = $false
+if (Test-Path $VenvPython) {
+    # A moved project can retain a launcher whose base Python path no longer exists.
+    try {
+        $Probe = Start-Process -FilePath $VenvPython -ArgumentList '--version' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $LogDir 'python-check.log') -RedirectStandardError (Join-Path $LogDir 'python-check-error.log')
+        $PythonWorks = ($Probe.ExitCode -eq 0)
+    }
+    catch { $PythonWorks = $false }
+}
+if (-not $PythonWorks) {
     Write-Host '[2/7] Downloading project-local Python and creating isolated environment...'
     & $UvExe python install 3.12 --managed-python
     Assert-Success 'Python download'
-    & $UvExe venv $VenvDir --python 3.12 --managed-python
+    & $UvExe venv $VenvDir --python 3.12 --managed-python --allow-existing
     Assert-Success 'Virtual environment creation'
 } else {
     Write-Host '[2/7] Project-local Python ready.'
@@ -167,6 +178,8 @@ finally {
     Pop-Location
 }
 
+if ($SetupOnly) { return }
+
 Write-Host '[7/7] Starting application...'
 
 # Always restart the project backend after rebuilding. Reusing an existing Python
@@ -200,7 +213,7 @@ if (-not (Test-AppOnline)) {
     throw "The application did not respond in time. Check: $StderrLog"
 }
 
-Start-Process $Url
+if (-not $NoBrowser) { Start-Process $Url }
 
 Write-Host ''
 Write-Host 'Paralegal Research Desk is open in your browser.'

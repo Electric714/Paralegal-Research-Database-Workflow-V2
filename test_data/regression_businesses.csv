@@ -1,0 +1,4 @@
+id,contractor_name,related_companies,address_1,city,state,zip,additional_address,additional_address_city,additional_address_state,additional_address_zip,dfi,wc,wc_date,osha_severe_violations,years,osha,state_federal_debarment,mndol_ineligibility,public_works_projects_budget_time_quality_complaint,federal_court,circuit_court,ccap_show150,environmental_violations,prevailing_wage_violations,dwd,dwd_substance_abuse_plan,better_business_bureau_complaints,misc_violations,tax_liability
+TEST-1,Regression Alpha Builders LLC,,123 Main St,Madison,WI,53703,,,,,,,,,,,,,,,,,,,,,,,
+TEST-2,Regression Beta Roofing LLC,,456 Oak St,Milwaukee,WI,53202,,,,,,,,,,,,,,,,,,,,,,,
+TEST-3,Zzyzx Unmatched Fixture Inc,,987 Test Ave,Duluth,MN,55802,,,,,,,,,,,Y,,,,,,,,,,,,

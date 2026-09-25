@@ -37,6 +37,8 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 ### Ongoing
 
+- [ ] **Repeatable debugging workflow** — verified locally on `main`: 196 backend tests, frontend build, isolated HTTP import/research/approve/dismiss/export workflow, all-source live audit tooling, and bidder/diagnostics UI checks. Includes retained reports and moved-folder Python recovery. Live MPCA is blocked by CAPTCHA; Responsible Minnesota no-matches remain partial. Not yet published. See `docs/DEBUGGING.md`.
+
 - [x] **Research Run Summary Dashboard** — persisted run reconciliation with completed/no-match/ambiguous/partial/blocked/failed/not-checked counts, per-source and bidder × source drill-down, source-owned-field change display, integrity checks, and safety tests. Merged in PR #27; CI passed.
 
 - [ ] **WDFI** — Wisconsin Department of Financial Institutions. Branch: `feature/wdfi-corporate-records`. Intended owned field: `dfi`

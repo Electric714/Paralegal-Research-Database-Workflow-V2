@@ -327,13 +327,18 @@ def _parse_address(value: str) -> tuple[str, str, str, str]:
     location_index = -1
     location_match: re.Match[str] | None = None
     for index in range(len(lines) - 1, -1, -1):
-        match = re.search(
-            r"(?P<city>[A-Za-z0-9 .'\-&]+?)\s*,\s*(?P<state>[A-Za-z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)\b",
-            lines[index],
-        )
-        if match:
-            location_index = index
-            location_match = match
+        # Live pages put city, comma, state and ZIP in separate text nodes.
+        # Join only a bounded location suffix; keep street/agent lines separate.
+        for width in range(1, min(4, len(lines) - index) + 1):
+            match = re.fullmatch(
+                r"(?P<city>[A-Za-z0-9 .'\-&]+?)\s*,\s*(?P<state>[A-Za-z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)",
+                " ".join(lines[index:index + width]),
+            )
+            if match:
+                location_index = index
+                location_match = match
+                break
+        if location_match:
             break
     if not location_match:
         return _clean_text(cleaned), "", "", ""

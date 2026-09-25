@@ -148,7 +148,7 @@ def _should_review_name_variant(approved_name: str, candidate_name: str, wratio:
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.0.2"
+    adapter_version = "1.0.3"
     parser_version = "1.0.1"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
@@ -181,6 +181,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         content_type = response.headers.get("content-type", "").casefold()
         body = response.content
         if "html" in content_type or body.lstrip().lower().startswith(b"<!doctype html"):
+            if any(marker in body[:65536].lower() for marker in (b'radware captcha page', b'captcha.perfdrive.com', b'hcaptcha', b'g-recaptcha')):
+                self.prepare_error = (SourceResultStatus.BLOCKED, "MPCA export requires human verification (CAPTCHA); automated research is blocked.", response.status_code)
+                return
             self.prepare_error = (SourceResultStatus.PARSER_FAILURE, "MPCA export returned HTML instead of structured CSV; no negative result is allowed.", response.status_code)
             return
 

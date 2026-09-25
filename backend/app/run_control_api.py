@@ -9,7 +9,10 @@ from fastapi.responses import StreamingResponse
 from . import database as db
 from .research.executor import execute_research_run
 from .research.run_control import prepare_resume, request_pause, request_stop
-from .research.run_summary import get_run_summary
+from .research.run_summary import (
+    AMBIGUOUS_STATUSES, BLOCKED_STATUSES, FAILED_STATUSES, PARTIAL_STATUSES,
+    get_run_summary,
+)
 from .research.service import list_tasks
 
 router = APIRouter()
@@ -68,19 +71,7 @@ def export_run_diagnostics(run_id: int):
         if details.get("run_id") == run_id:
             run_diagnostics.append(item)
 
-    issue_statuses = {
-        "AUTH_REQUIRED",
-        "BLOCKED",
-        "HTTP_ERROR",
-        "SOURCE_UNAVAILABLE",
-        "DATASET_MALFORMED",
-        "LAYOUT_CHANGED",
-        "PARSER_FAILURE",
-        "TIMEOUT",
-        "PARTIAL_RESULTS",
-        "AMBIGUOUS_MATCH",
-        "MANUAL_REVIEW_REQUIRED",
-    }
+    issue_statuses = BLOCKED_STATUSES | FAILED_STATUSES | PARTIAL_STATUSES | AMBIGUOUS_STATUSES
     problematic_tasks = [task for task in tasks if str(task.get("status")) in issue_statuses]
     pending_tasks = [task for task in tasks if str(task.get("status")) == "NOT_CHECKED"]
 

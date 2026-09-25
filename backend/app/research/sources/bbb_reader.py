@@ -135,6 +135,11 @@ def parse_search_profiles(text: str) -> tuple[list[BbbProfile], int | None]:
 
 def parse_complaint_summary(text: str) -> tuple[int | None, int | None]:
     """Read BBB's published complaint summary from Reader markdown."""
+    # Reader includes a long navigation menu and a title containing "Complaints".
+    # Anchor to the actual section before applying the bounded summary window.
+    heading = re.search(r"^#{1,6}\s+(?:Customer\s+)?Complaints\s*$", text or '', re.IGNORECASE | re.MULTILINE)
+    if heading:
+        text = text[heading.start():]
     plain = plain_markdown(text)
     marker = plain.casefold().find("complaints")
     region = plain[marker: marker + 3000] if marker >= 0 else plain[:3000]
