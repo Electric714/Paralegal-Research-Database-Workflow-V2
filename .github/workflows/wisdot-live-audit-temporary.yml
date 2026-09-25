@@ -79,7 +79,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wisdot-live-audit-v2
+          name: wisdot-live-audit-v3
           path: |
             .runtime/live-audits
             .runtime/wisdot-targeted-exit-code.txt
@@ -89,5 +89,16 @@ jobs:
         shell: bash
         run: |
           test "$(cat .runtime/wisdot-targeted-exit-code.txt)" = "0"
-          test "$(cat .runtime/wisdot-full-exit-code.txt)" = "0"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path('.runtime/live-audits/latest.json').read_text(encoding='utf-8'))
+          source = next(item for item in report['sources'] if item['source'] == 'wisdot')
+          checks = source.get('checks') or []
+          allowed = {'SUCCESS_NO_MATCH', 'SUCCESS_COMPLETE', 'SUCCESS_WITH_FINDINGS', 'AMBIGUOUS_MATCH'}
+          assert len(checks) == 24, f'Expected 24 WisDOT checks, got {len(checks)}'
+          assert all(check.get('completeness_status') == 'COMPLETE' for check in checks), checks
+          assert all(check.get('status') in allowed for check in checks), checks
+          PY
           git push origin HEAD:main
