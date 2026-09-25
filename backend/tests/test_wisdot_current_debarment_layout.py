@@ -24,7 +24,8 @@ Norwalk, OH 44857
 Adam M. Reichert
 6/3/2026 10/01/2026 Debarment Statewide FHWA
 Oak Creek, WI 53154
-Apex Commercial Construction, Inc. dba Kuehne Company
+Apex Commercial Construction, Inc. dba 
+Kuehne Company
 6830 S. Howell Ave
 12/5/2024 12/5/2027 Debarment Statewide WisDOT 1, 3
 Norwalk, OH 44857
@@ -212,3 +213,32 @@ def test_current_layout_known_no_match_remains_clean_negative(tmp_path: Path):
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.is_clean_negative is True
     assert not any(item.field_name == "state_federal_debarment" for item in result.evidence)
+
+
+def test_pdf_extractor_falls_back_when_layout_mode_drops_table_pages(monkeypatch):
+    import app.research.sources.wisdot as wisdot_module
+
+    class FakePage:
+        def __init__(self, layout: str, plain: str):
+            self.layout = layout
+            self.plain = plain
+
+        def extract_text(self, extraction_mode=None):
+            return self.layout if extraction_mode == "layout" else self.plain
+
+    class FakeReader:
+        pages = [
+            FakePage("memo layout", "memo plain"),
+            FakePage(
+                "",
+                "Oak Creek, WI 53154\nApex Commercial Construction, Inc. dba Kuehne Company\n"
+                "6830 S. Howell Ave\n12/5/2024 12/5/2027 Debarment Statewide WisDOT 1, 3",
+            ),
+        ]
+
+    monkeypatch.setattr(wisdot_module, "PdfReader", lambda _stream: FakeReader())
+    extracted = wisdot_module._extract_pdf_text(b"%PDF-test")
+
+    assert "memo layout" in extracted
+    assert "Apex Commercial Construction" in extracted
+    assert "12/5/2024 12/5/2027 Debarment" in extracted

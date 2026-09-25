@@ -166,10 +166,23 @@ def _extract_pdf_text(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     pages: list[str] = []
     for page in reader.pages:
+        layout_text = ""
         try:
-            text = page.extract_text(extraction_mode="layout") or ""
+            layout_text = page.extract_text(extraction_mode="layout") or ""
         except TypeError:
-            text = page.extract_text() or ""
+            pass
+
+        # Some WisDOT PDFs contain rotated/table text that pypdf's layout mode
+        # drops entirely even though ordinary extraction can read it. Prefer the
+        # layout representation when it is substantive, but fall back per page
+        # when it contains only a small fraction of the plain extraction.
+        plain_text = page.extract_text() or ""
+        layout_size = len(re.sub(r"\s+", "", layout_text))
+        plain_size = len(re.sub(r"\s+", "", plain_text))
+        if plain_size and (not layout_text.strip() or layout_size < plain_size // 3):
+            text = plain_text
+        else:
+            text = layout_text or plain_text
         pages.append(text)
     return "\n\f\n".join(pages)
 
