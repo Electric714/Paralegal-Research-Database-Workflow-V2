@@ -1,0 +1,42 @@
+name: Temporary WisDOT Live Audit
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  wisdot-live-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Targeted live WisDOT worker test
+        shell: bash
+        run: |
+          set +e
+          python scripts/live_audit.py --bidder-csv "Bidder Database-Example.csv" --source wisdot --limit 1 --timeout 240
+          code=$?
+          echo "$code" > .runtime/wisdot-targeted-exit-code.txt
+          exit 0
+      - name: Full 24-bidder WisDOT live audit
+        shell: bash
+        run: |
+          set +e
+          python scripts/live_audit.py --bidder-csv "Bidder Database-Example.csv" --source wisdot --limit 0 --timeout 240
+          code=$?
+          echo "$code" > .runtime/wisdot-full-exit-code.txt
+          exit 0
+      - name: Upload WisDOT audit evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: wisdot-live-audit
+          path: |
+            .runtime/live-audits
+            .runtime/wisdot-targeted-exit-code.txt
+            .runtime/wisdot-full-exit-code.txt
+          if-no-files-found: error
