@@ -20,6 +20,8 @@ The CSV path in the last command is a local export made during the initial debug
 
 Each invocation writes `.runtime/checks/latest.json` plus a retained directory containing its report, test/build/server logs, pytest XML, application diagnostics and isolated SQLite database. The controlled workflow uses the three explicitly synthetic bidders in `test_data/`: two exact SAM matches and one no-match with an existing positive master value. It verifies that research does not change master values, approval applies one proposal, dismissal preserves the other record, and no-match does not erase the existing positive value. The fixture SAM extract receives today's date to avoid a test expiring; this does not refresh or relabel real SAM data.
 
+Every `live_audit.py` run also writes `RUN_LOG.md` beside `report.json`. Read it first: it summarizes each source and labels every incomplete result with the source stage, affected bidder samples, source URL when available, exact warning, and artifact folder. The JSON report remains the complete machine-readable record.
+
 Exit code 0 means all requested checks passed. Exit code 1 means a failure or live result needs attention. `live_sources.status = not_checked` means no live-source validation was requested. A green controlled workflow is not evidence that every external source works. The runner itself never edits application code or bypasses access controls; an agent uses its reports to make and verify fixes under `AGENTS.md`.
 
 ## Initial verification, 2026-09-25

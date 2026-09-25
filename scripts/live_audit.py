@@ -23,6 +23,94 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'backend'))
 
+SUCCESS_STATUSES = {'SUCCESS_NO_MATCH', 'SUCCESS_COMPLETE', 'SUCCESS_WITH_FINDINGS'}
+
+
+def _issue_groups(source: dict) -> list[dict]:
+    """Group actionable source failures so a human can see what failed and where."""
+    snapshots = {item.get('searched_name'): item.get('source_url') for item in source.get('snapshots', [])}
+    groups: dict[tuple[str, str, str, str], dict] = {}
+    for check in source.get('checks', []):
+        status = str(check.get('status') or 'NOT_CHECKED')
+        completeness = str(check.get('completeness_status') or 'UNKNOWN')
+        warnings = check.get('warnings') or []
+        warning = str(warnings[0]) if warnings else ''
+        is_clean = status in SUCCESS_STATUSES and completeness == 'COMPLETE'
+        if is_clean:
+            continue
+        key = (status, completeness, str(check.get('acquisition_method') or 'unknown'), warning)
+        group = groups.setdefault(key, {
+            'status': status, 'completeness': completeness,
+            'stage': str(check.get('acquisition_method') or 'unknown'),
+            'warning': warning, 'bidders': [], 'url': '', 'count': 0,
+        })
+        group['count'] += 1
+        bidder = str(check.get('contractor_name') or 'unknown bidder')
+        if len(group['bidders']) < 5:
+            group['bidders'].append(bidder)
+        group['url'] = group['url'] or str(snapshots.get(bidder) or '')
+    return list(groups.values())
+
+
+def render_run_log(report: dict) -> str:
+    """Create the human-readable companion to report.json after every audit save."""
+    lines = [
+        '# Live Source Audit Log', '',
+        f"- **Run:** `{report['run_id']}`",
+        f"- **Status:** `{report['status']}`",
+        f"- **Started:** {report['started_at']}",
+        f"- **Bidder input:** `{report['bidder_csv']}`",
+        f"- **Tested per source:** {'all imported bidders' if not report.get('bidder_limit') else report['bidder_limit']}",
+        f"- **Artifacts:** `{report['artifacts']}`", '',
+        '## Results', '',
+        '| Source | Result | What happened |',
+        '| --- | --- | --- |',
+    ]
+    for source in report.get('sources', []):
+        counts = source.get('outcome_counts') or {}
+        if source.get('status') == 'not_implemented':
+            result, detail = 'NOT IMPLEMENTED', source.get('note', '')
+        elif source.get('status') in {'timed_out', 'worker_failed'}:
+            result, detail = source['status'].upper(), source.get('error', 'See worker.log.')
+        elif not source.get('master_preserved', False):
+            result, detail = 'AUDIT ERROR', 'The isolated audit did not confirm master-data preservation.'
+        elif not counts:
+            result, detail = 'NO RESULTS', 'No source-check result was persisted. See worker.log.'
+        elif all(status.split('/', 1)[0] in SUCCESS_STATUSES and status.endswith('/COMPLETE') for status in counts):
+            result, detail = 'WORKING', ', '.join(f'{count} {status}' for status, count in counts.items())
+        else:
+            result, detail = 'NEEDS ATTENTION', ', '.join(f'{count} {status}' for status, count in counts.items())
+        lines.append(f"| {source['source']} | {result} | {detail.replace('|', '/')} |")
+
+    lines.extend(['', '## Problems: what and where', ''])
+    any_problem = False
+    for source in report.get('sources', []):
+        problems = _issue_groups(source)
+        if source.get('status') == 'not_implemented':
+            any_problem = True
+            lines.extend([f"### {source['name']} (`{source['source']}`)", '',
+                          f"- **Label:** NOT IMPLEMENTED", f"- **Where:** `{source['directory']}`", f"- **What:** {source.get('note', '')}", ''])
+        elif source.get('status') in {'timed_out', 'worker_failed'}:
+            any_problem = True
+            lines.extend([f"### {source['name']} (`{source['source']}`)", '',
+                          f"- **Label:** {source['status'].upper()}", f"- **Where:** `{source['directory']}\\worker.log`",
+                          f"- **What:** {source.get('error', 'The source exceeded its audit time limit or exited unsuccessfully.')}", ''])
+        for problem in problems:
+            any_problem = True
+            lines.extend([f"### {source['name']} (`{source['source']}`)", '',
+                          f"- **Label:** `{problem['status']}` / `{problem['completeness']}`",
+                          f"- **Where:** `{problem['stage']}`; source folder `{source['directory']}`",
+                          f"- **Affected:** {problem['count']} bidder(s): {', '.join(problem['bidders'])}",
+                          f"- **What went wrong:** {problem['warning'] or 'The result is incomplete or unchecked; inspect report.json and worker.log.'}"])
+            if problem['url']:
+                lines.append(f"- **Last source URL:** {problem['url']}")
+            lines.append('')
+    if not any_problem:
+        lines.extend(['No scraper, access, or data-completeness problem was recorded.', ''])
+    lines.extend(['## Evidence', '',
+                  'Each source folder contains `worker.log`, request metadata in `requests.jsonl` when HTTP was used, and an isolated `data/audit.db`. `report.json` is the machine-readable complete record.', ''])
+    return '\n'.join(lines)
+
 
 def worker(args):
     from app import database as db
@@ -133,6 +221,7 @@ def main():
               'status': 'running', 'sources': [], 'artifacts': str(output)}
     def save():
         (output / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        (output / 'RUN_LOG.md').write_text(render_run_log(report), encoding='utf-8')
         (output.parent / 'latest.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     def run_source(source):
         key = source['key']
