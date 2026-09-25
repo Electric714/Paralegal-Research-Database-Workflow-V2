@@ -1,0 +1,342 @@
+.chatgpt-fallback-launcher {
+  position: fixed;
+  right: 24px;
+  bottom: 84px;
+  z-index: 85;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: var(--panel, #ffffff);
+  color: var(--text, #1f2937);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.chatgpt-fallback-launcher:hover {
+  transform: translateY(-1px);
+}
+
+.chatgpt-fallback-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.52);
+  backdrop-filter: blur(3px);
+}
+
+.chatgpt-fallback-modal {
+  width: min(1120px, 96vw);
+  max-height: 92vh;
+  overflow: auto;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 18px;
+  background: var(--panel, #ffffff);
+  color: var(--text, #1f2937);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+}
+
+.chatgpt-fallback-modal > header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--border, #d8dee8);
+  background: var(--panel, #ffffff);
+}
+
+.chatgpt-fallback-modal h2 {
+  margin: 4px 0 6px;
+  font-size: 24px;
+}
+
+.chatgpt-fallback-modal p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.chatgpt-fallback-kicker {
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.62;
+}
+
+.chatgpt-fallback-icon {
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chatgpt-fallback-alert {
+  margin: 16px 24px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 12px;
+  line-height: 1.45;
+}
+
+.chatgpt-fallback-alert.success {
+  background: rgba(22, 163, 74, 0.08);
+}
+
+.chatgpt-fallback-alert.warning {
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.chatgpt-fallback-alert.error {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.chatgpt-fallback-summary {
+  margin: 18px 24px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chatgpt-fallback-summary.compact {
+  margin: 14px 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.chatgpt-fallback-summary > div {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.chatgpt-fallback-summary strong,
+.chatgpt-fallback-summary span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chatgpt-fallback-summary strong {
+  font-size: 16px;
+}
+
+.chatgpt-fallback-summary span {
+  margin-top: 3px;
+  font-size: 12px;
+  opacity: 0.66;
+}
+
+.chatgpt-fallback-source-list {
+  margin: 0 24px 20px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.chatgpt-fallback-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border, #d8dee8);
+}
+
+.chatgpt-fallback-source:last-child {
+  border-bottom: 0;
+}
+
+.chatgpt-fallback-source.active {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.chatgpt-fallback-source > div:first-child {
+  min-width: 0;
+}
+
+.chatgpt-fallback-source strong,
+.chatgpt-fallback-source span {
+  display: block;
+}
+
+.chatgpt-fallback-source span {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.68;
+}
+
+.chatgpt-fallback-source a {
+  margin-top: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.78;
+}
+
+.chatgpt-fallback-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chatgpt-fallback-actions button,
+.chatgpt-fallback-section-heading button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chatgpt-fallback-actions button:first-child {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.chatgpt-fallback-actions button:disabled,
+.chatgpt-fallback-section-heading button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.chatgpt-fallback-prompt,
+.chatgpt-fallback-comparison {
+  margin: 0 24px 20px;
+  padding: 16px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 14px;
+}
+
+.chatgpt-fallback-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.chatgpt-fallback-section-heading strong,
+.chatgpt-fallback-section-heading span {
+  display: block;
+}
+
+.chatgpt-fallback-section-heading span {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.66;
+}
+
+.chatgpt-fallback-prompt textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.06);
+  color: inherit;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.chatgpt-fallback-differences {
+  display: grid;
+  gap: 9px;
+}
+
+.chatgpt-fallback-differences > div {
+  padding: 11px 12px;
+  border: 1px solid var(--border, #d8dee8);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.chatgpt-fallback-differences strong,
+.chatgpt-fallback-differences span,
+.chatgpt-fallback-differences small {
+  display: block;
+}
+
+.chatgpt-fallback-differences span {
+  margin-top: 4px;
+}
+
+.chatgpt-fallback-differences small {
+  margin-top: 5px;
+  opacity: 0.7;
+  line-height: 1.4;
+}
+
+.chatgpt-fallback-differences code {
+  font: inherit;
+  font-weight: 700;
+}
+
+.chatgpt-fallback-safety {
+  margin-top: 14px !important;
+  font-size: 12px;
+  opacity: 0.68;
+}
+
+@media (max-width: 760px) {
+  .chatgpt-fallback-launcher {
+    right: 12px;
+    bottom: 72px;
+  }
+
+  .chatgpt-fallback-backdrop {
+    padding: 8px;
+  }
+
+  .chatgpt-fallback-modal {
+    width: 100%;
+    max-height: 96vh;
+  }
+
+  .chatgpt-fallback-summary,
+  .chatgpt-fallback-summary.compact {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .chatgpt-fallback-source {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .chatgpt-fallback-actions {
+    width: 100%;
+  }
+
+  .chatgpt-fallback-actions button {
+    flex: 1;
+    justify-content: center;
+  }
+}
