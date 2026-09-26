@@ -5,7 +5,7 @@ from .sources.bbb_resilient import ResilientBbbBusinessProfileSource
 from .sources.dol_enforcement import DolEnforcementSource
 from .sources.mn_debarment_verified import VerifiedMinnesotaDebarredVendorsSource
 from .sources.mn_pca import MinnesotaPcaEnforcementSource
-from .sources.osha_operational import OperationalOshaEstablishmentSource
+from .sources.osha_indexed import IndexedOshaEstablishmentSource
 from .sources.responsible_mn import ResponsibleMinnesotaSource
 from .sources.runtime_status_adapters import (
     OperationalSamUploadedExclusionsSource,
@@ -21,7 +21,7 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "dol_enforcement": DolEnforcementSource,
     "mn_debarment": VerifiedMinnesotaDebarredVendorsSource,
     "mn_pca": MinnesotaPcaEnforcementSource,
-    "osha": OperationalOshaEstablishmentSource,
+    "osha": IndexedOshaEstablishmentSource,
     "responsible_mn": ResponsibleMinnesotaSource,
     "sam": OperationalSamUploadedExclusionsSource,
     "violation_tracker": ViolationTrackerSource,
