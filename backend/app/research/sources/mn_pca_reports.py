@@ -26,7 +26,7 @@ KNOWN_REPORT_URLS = (
 )
 
 MIN_TOTAL_REPORT_RECORDS = 250
-MIN_REPORT_ROWS_PER_PAGE = 5
+MIN_REPORT_ROWS_PER_PAGE = 1
 READER_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -337,8 +337,8 @@ def parse_report_markdown(markdown: str, *, source_url: str) -> tuple[list[dict[
     index = 0
     while index < len(lines):
         line = lines[index].strip()
-        if line.startswith(('-', '*')):
-            bullet_items.append(line.lstrip('-* ').strip())
+        if line.startswith(("-", "*")):
+            bullet_items.append(line.lstrip("-* ").strip())
         if not (line.startswith("|") and line.endswith("|")):
             index += 1
             continue
