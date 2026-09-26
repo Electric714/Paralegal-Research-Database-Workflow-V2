@@ -37,7 +37,10 @@ def source_for(body: str = CSV, status: int = 200, content_type: str = "text/csv
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == CSV_EXPORT_URL
         return httpx.Response(status, text=body, headers={"content-type": content_type}, request=request)
-    return MinnesotaPcaEnforcementSource(client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True))
+    return MinnesotaPcaEnforcementSource(
+        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
+        use_tableau_legacy=True,
+    )
 
 
 def source_for_wimn_fallback(
@@ -76,8 +79,30 @@ def source_for_wimn_fallback(
         raise AssertionError(f"unexpected URL: {url}")
 
     return MinnesotaPcaEnforcementSource(
+        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
+        use_tableau_legacy=True,
+    )
+
+
+def source_for_primary_wimn(*, sites: list[dict] | None = None, actions: list[dict] | None = None) -> tuple[MinnesotaPcaEnforcementSource, list[str]]:
+    sites = sites if sites is not None else []
+    actions = actions if actions is not None else []
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.host == "data.pca.state.mn.us":
+            raise AssertionError("production MPCA research must not request the Tableau endpoint")
+        if request.url.path == "/api/v1/wimn/sites":
+            return httpx.Response(200, json={"data": sites, "recordCount": len(sites)}, request=request)
+        if request.url.path == "/api/v1/wimn/sites/enforcement-actions":
+            return httpx.Response(200, json={"data": actions, "recordCount": len(actions)}, request=request)
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    source = MinnesotaPcaEnforcementSource(
         client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
     )
+    return source, requested_paths
 
 
 def test_parser_validates_and_reads_official_export_shape():
@@ -107,7 +132,19 @@ def test_missing_required_columns_fails_closed():
         raise AssertionError("expected MpcaDatasetError")
 
 
-def test_captcha_falls_back_to_official_wimn_api():
+def test_default_production_mode_uses_wimn_without_touching_tableau():
+    source, requested_paths = source_for_primary_wimn(sites=[])
+    result = source.search(contractor(name="No Such Contractor LLC"))
+
+    assert result.status == SourceResultStatus.SUCCESS_NO_MATCH
+    assert result.completeness_status == CompletenessStatus.COMPLETE
+    assert result.is_clean_negative is True
+    assert result.acquisition_method == "official_wimn_rest_api"
+    assert "/api/v1/wimn/sites" in requested_paths
+    assert all("Enforcementactionswithpenalties" not in path for path in requested_paths)
+
+
+def test_captcha_falls_back_to_official_wimn_api_in_legacy_mode():
     result = source_for_wimn_fallback(
         sites=[],
         tableau_body=CAPTCHA_HTML,
@@ -117,8 +154,8 @@ def test_captcha_falls_back_to_official_wimn_api():
     assert result.status == SourceResultStatus.SUCCESS_NO_MATCH
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.is_clean_negative is True
-    assert result.acquisition_method == "official_wimn_rest_fallback"
-    assert "CAPTCHA" in result.normalized_payload["tableau_fallback_reason"]
+    assert result.acquisition_method == "official_wimn_rest_api"
+    assert "CAPTCHA" in result.normalized_payload["legacy_tableau_context"]
     assert result.evidence == []
 
 
@@ -179,7 +216,7 @@ def test_html_instead_of_csv_fails_closed():
     assert result.is_clean_negative is False
 
 
-def test_tableau_layout_change_falls_back_to_official_wimn_api():
+def test_tableau_layout_change_falls_back_to_official_wimn_api_in_legacy_mode():
     site = {
         "siteId": "123",
         "siteName": "Acme Construction LLC",
@@ -206,24 +243,24 @@ def test_tableau_layout_change_falls_back_to_official_wimn_api():
     assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
     assert result.identity_status == IdentityStatus.CONFIRMED
     assert result.completeness_status == CompletenessStatus.COMPLETE
-    assert result.acquisition_method == "official_wimn_rest_fallback"
+    assert result.acquisition_method == "official_wimn_rest_api"
     assert result.evidence[0].observed_value == "Y"
     assert result.evidence[0].details["site_id"] == "123"
     assert result.evidence[0].details["penalty"] == "$9,663"
-    assert "regulated-party/company column not found" in result.normalized_payload["tableau_fallback_reason"]
+    assert "regulated-party/company column not found" in result.normalized_payload["legacy_tableau_context"]
 
 
-def test_wimn_fallback_clean_no_match_when_site_search_is_complete():
+def test_wimn_clean_no_match_when_site_search_is_complete():
     result = source_for_wimn_fallback(sites=[]).search(contractor(name="No Such Contractor LLC"))
 
     assert result.status == SourceResultStatus.SUCCESS_NO_MATCH
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.is_clean_negative is True
-    assert result.acquisition_method == "official_wimn_rest_fallback"
+    assert result.acquisition_method == "official_wimn_rest_api"
     assert result.evidence == []
 
 
-def test_wimn_fallback_similar_site_requires_review():
+def test_wimn_similar_site_requires_review():
     site = {
         "siteId": "456",
         "siteName": "Acme Construction Services LLC",
@@ -241,7 +278,7 @@ def test_wimn_fallback_similar_site_requires_review():
     assert result.evidence[0].details["master_field_proposal_allowed"] is False
 
 
-def test_wimn_fallback_http_failure_cannot_become_negative():
+def test_wimn_http_failure_cannot_become_negative():
     result = source_for_wimn_fallback(sites_status=503).search(contractor())
 
     assert result.status == SourceResultStatus.HTTP_ERROR
@@ -249,7 +286,7 @@ def test_wimn_fallback_http_failure_cannot_become_negative():
     assert result.is_clean_negative is False
 
 
-def test_wimn_fallback_ignores_nonmonetary_actions_to_preserve_tableau_scope():
+def test_wimn_ignores_nonmonetary_actions_to_preserve_tableau_scope():
     site = {
         "siteId": "123",
         "siteName": "Acme Construction LLC",
