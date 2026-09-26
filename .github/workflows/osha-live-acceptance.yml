@@ -34,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download, validate, index, and audit official OSHA data
+      - name: Download, validate, index, and audit all 24 bidders
         shell: bash
         env:
           INPUT_LIMIT: ${{ github.event.inputs.bidder_limit || '24' }}
@@ -49,6 +49,16 @@ jobs:
         if: always()
         run: python scripts/refresh_osha_bulk.py --status-only
 
+      - name: Show OSHA acceptance result
+        if: always()
+        shell: bash
+        run: |
+          if [ -f .runtime/osha-acceptance-latest.json ]; then
+            cat .runtime/osha-acceptance-latest.json
+          else
+            echo "No OSHA acceptance result was produced."
+          fi
+
       - name: Upload live acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +66,7 @@ jobs:
           name: osha-live-acceptance-${{ github.run_id }}
           path: |
             .runtime/osha-preflight-latest.json
+            .runtime/osha-acceptance-latest.json
             .runtime/live-audits/**
           if-no-files-found: warn
           retention-days: 14
