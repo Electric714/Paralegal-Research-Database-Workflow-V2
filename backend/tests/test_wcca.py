@@ -8,6 +8,7 @@ from app.research.service import list_tasks, persist_source_result
 from app.research.source_registry import create_source
 from app.research.sources.base import ContractorContext
 from app.research.sources.wcca import WccaCcapSource, WccaOperatorAssistedSource, build_operator_result, build_search_plan
+from app.research.sources.wcca_browser import WccaPublicBrowserSource
 
 
 @pytest.fixture()
@@ -53,17 +54,18 @@ def test_search_plan_preserves_commas_inside_legal_name_and_deduplicates_aliases
     assert plan["scope"] == "approved_bidder_and_explicit_related_company_aliases_only"
 
 
-def test_registry_uses_completed_wcca_adapter_and_legacy_name_still_resolves():
+def test_registry_uses_live_public_browser_adapter_and_legacy_manual_adapter_still_resolves():
     source = create_source("wcca")
-    assert isinstance(source, WccaCcapSource)
+    assert isinstance(source, WccaPublicBrowserSource)
     assert WccaOperatorAssistedSource is WccaCcapSource
     health = source.health_check()
-    assert health["status"] == "ready_operator_assisted"
-    assert health["completion_path"] == "wcca_workbench"
-    assert health["public_site_automation"] is False
+    assert health["status"] == "ready_public_browser"
+    assert health["public_site_automation"] is True
+    assert health["rest_api_used"] is False
+    assert health["captcha_bypass"] is False
 
 
-def test_adapter_stops_for_operator_instead_of_scraping_public_wcca():
+def test_legacy_manual_adapter_still_stops_for_operator_instead_of_scraping_public_wcca():
     result = WccaCcapSource().search(contractor())
     assert result.status == SourceResultStatus.MANUAL_REVIEW_REQUIRED
     assert result.completeness_status == CompletenessStatus.UNKNOWN
