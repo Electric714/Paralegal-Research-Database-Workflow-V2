@@ -53,8 +53,14 @@ def test_packaged_app_exposes_wcca_status(api_client):
     response = client.get("/api/sources/wcca/status")
     assert response.status_code == 200
     item = response.json()["item"]
-    assert item["mode"] == "operator_assisted"
+    assert item["mode"] == "live_public_browser_with_operator_challenge_handoff"
+    assert item["primary_acquisition"] == "public_wcca_business_search_browser"
+    assert item["public_browser_automation"] is True
     assert item["automatic_public_scraping"] is False
+    assert item["rest_api_used"] is False
+    assert item["rest_api_planned"] is False
+    assert item["captcha_bypass"] is False
+    assert item["manual_workbench_role"] == "fallback_and_review"
     assert item["negative_field_updates"] is False
 
 
