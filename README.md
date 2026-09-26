@@ -33,6 +33,9 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [x] **Approve / Dismiss Review Workflow** — proposed changes require human approval before modifying master data
 - [x] **Audit / Revision History** — master revisions and audit events retained
 - [x] **Automated Backend Testing / CI** — fixture-test pattern and pytest CI coverage for the research foundation
+- [x] **Violation Tracker** — live source audit completed successfully; registered evidence-only enforcement adapter with regression coverage and no automatic master-field ownership
+- [x] **Wisconsin DOT Contractor Information** — automatic WisDOT/HCCI official-PDF refresh, immutable caching, debarment/vendor matching, and Finals Status evidence verified in the live audit; findings, clean no-matches, and review cases are handled explicitly
+- [x] **Minnesota Debarred Vendors** — complete official Minnesota list acquisition and exact approved-name/alias verification workflow validated across the live bidder audit; complete no-matches are reported without writing a false shared debarment `N`
 - [x] **GSA State Suspension / Debarment Directory — No Direct Integration Needed** — evaluated as a legacy/meta-directory of links to state suspension/debarment sources, not a contractor-level dataset. The old GSA OIG directory URL is no longer a usable data source. Do not build a GSA scraper/adapter; integrate the relevant authoritative state sources directly instead.
 
 ### Ongoing
@@ -47,11 +50,8 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 - [ ] **BBB** — Targeted business-profile research and post-merge hardening are merged to `main`. Intended owned field: `better_business_bureau_complaints`. Final representative real-bidder/end-to-end verification remains before marking the source complete
 - [ ] **WCRB** — Wisconsin Compensation Rating Bureau; intended owned fields: `wc`, `wc_date`
 - [ ] **WCCA / CCAP** — operator-assisted WCCA workbench is implemented. Public WCCA findings are positive-only comparison evidence for `circuit_court`; a public no-match never becomes `circuit_court=N`. `ccap_show150` remains undefined/write-disabled pending the firm's legacy rule. See `docs/sources/WCCA.md`. Representative real-bidder verification remains before completion
-- [ ] **Violation Tracker** — enforcement evidence; exact bidder-field ownership still needs confirmation
 - [ ] **U.S. Department of Labor Enforcement Data** — use the official DOL Open Data Portal v4 API rather than scraping the retired enforcement-data site. DOL API accounts are free; the `/v4/datasets` catalog is keyless, while metadata/data requests require a private API key that must never be committed or logged. Phase 1 will target Wage and Hour Division enforcement/compliance data with conservative bidder identity matching. Branch: `feature/dol-enforcement-api`. Automatic field ownership remains disabled until the firm's semantics are confirmed; `prevailing_wage_violations` is the strongest candidate mapping for confirmed Davis-Bacon and Related Acts findings.
-- [ ] **Wisconsin DOT Contractor Information (Problem)** — automatic WisDOT/HCCI official-PDF refresh, immutable caching, debarment/vendor matching, and Finals Status evidence are implemented in PR #19 (`feature/wisdot-auto-refresh-implementation`). Confirmed debarred/suspended/ineligible matches may propose `state_federal_debarment = Y`; WisDOT no-match never proposes `N`; Finals Status remains evidence-only. Final representative real-bidder/end-to-end verification remains before marking complete.
 - [ ] **PACER — Problems (Ongoing)** — intended owned field: `federal_court`. The official PACER API/search is fee-based, so this project will not use it. Free alternatives reviewed so far do not provide an adequate replacement for the firm's PACER workflow. Keep this item open until a reliable no-cost acquisition method is identified; do not implement paid PACER API access.
-- [ ] **Minnesota Debarred Vendors** — intended owned field: `state_federal_debarment`
 - [ ] **Responsible Minnesota** — public ineligible-contractors HTML adapter implemented in PR #33 (`feature/responsible-mn-ineligibility`). The page is fetched once per research run, parsed with layout validation, and matched only against approved bidder names/aliases. Current exact matches are stored as comparison evidence for candidate field `mndol_ineligibility`; expired rows remain historical evidence; fuzzy names require review; no-match is partial and never means eligible. Automatic field ownership remains disabled until the firm's legacy `mndol_ineligibility` semantics are confirmed. Final representative real-bidder/end-to-end verification remains before completion. See `docs/sources/RESPONSIBLE_MN.md`.
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — official structured MPCA enforcement-data adapter implemented on branch `feature/minnesota-pca-enforcement`; confirmed exact bidder/approved-alias matches may propose `environmental_violations = Y`; clean no-match never proposes `N`; ambiguous/failed/malformed results fail closed. Final live representative-bidder verification remains before completion. See `docs/sources/MN_PCA.md`.
@@ -61,7 +61,6 @@ A task belongs under **Completed** only when the relevant work is merged to `mai
 
 ### To Do
 
-- [ ] **Wisconsin DOT Contractor Information** — acquisition path and bidder-field ownership still need confirmation
 - [ ] **Responsible Minnesota** — acquisition path and exact bidder-field ownership still needs confirmation
 - [ ] **Minnesota PCA Enforcement Actions** — intended owned field: `environmental_violations`
 - [ ] **Research Run Summary Dashboard** — implementation complete on branch `feature/research-run-summary-dashboard`; persisted run reconciliation, source/bidder drill-down, source-owned-field change display, and safety tests added. Pending CI/manual verification and merge to `main`
@@ -86,7 +85,7 @@ A source moves from **Ongoing** to **Completed** only when all applicable gates 
 
 ### Recommended Implementation Order
 
-Finish and verify the active source tracks first: **SAM.gov → OSHA → WDFI → BBB → WCRB → WCCA/CCAP → Violation Tracker → DOL Enforcement → Wisconsin DOT → Minnesota Debarment**. DOL Enforcement should use the official v4 Open Data API and begin with WHD enforcement data rather than scraping the retired Enforcement Data site. Wisconsin DOT uses automatic official-PDF refresh and local cached matching rather than per-bidder scraping. Then proceed to remaining structured enforcement/debarment sources such as **Minnesota PCA**. The former **GSA State Suspension / Debarment Directory** is not an implementation target; use the underlying authoritative state sources directly. **PACER remains an ongoing problem item until a reliable no-cost acquisition method is identified; do not implement the fee-based PACER API/search workflow.**
+Finish and verify the active source tracks first: **SAM.gov → OSHA → WDFI → BBB → WCRB → WCCA/CCAP → DOL Enforcement**. DOL Enforcement should use the official v4 Open Data API and begin with WHD enforcement data rather than scraping the retired Enforcement Data site. Then proceed to remaining structured enforcement/debarment sources such as **Minnesota PCA**. The former **GSA State Suspension / Debarment Directory** is not an implementation target; use the underlying authoritative state sources directly. **PACER remains an ongoing problem item until a reliable no-cost acquisition method is identified; do not implement the fee-based PACER API/search workflow.**
 
 ## Project Goal
 
