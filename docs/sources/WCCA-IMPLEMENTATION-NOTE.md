@@ -1,42 +1,67 @@
 # WCCA / CCAP adapter implementation status
 
-The public Wisconsin Circuit Court Access adapter is implemented directly on `main` as `WccaCcapSource` (adapter `1.0.0`, parser `operator-v3`). The previous `WccaOperatorAssistedSource` name remains as a compatibility alias only.
+The primary Wisconsin Circuit Court Access adapter now uses the normal public WCCA website through a persistent local browser session. It does **not** use the paid WCCA REST API and the REST API is **not** the planned acquisition path for this project.
 
-## Why the adapter is operator-assisted
+The registered source is `WccaPublicBrowserSource` (adapter `2.0.0`, parser `public-results-v1`). The older `WccaCcapSource` / `WccaOperatorAssistedSource` implementation remains only as the manual workbench fallback and as shared result-normalization logic.
 
-The public WCCA site intentionally uses CAPTCHA and anti-scraping controls. The production adapter therefore does not attempt CAPTCHA solving, undocumented endpoint reverse engineering, or unattended screen scraping. A fully unattended transport should be added only through the official CCAP WCCA REST subscription service after the firm obtains the applicable agreement, credentials, and technical documentation.
+## Acquisition design
 
-Operator assistance is the acquisition method, not an incomplete code path. The adapter itself owns the full V2 source contract: bounded search planning, explicit completion state, identity validation, evidence normalization, provenance, comparison semantics, and persistence through the normal research pipeline.
+The adapter opens the same public WCCA pages a paralegal uses, accepts the normal WCCA site acknowledgement, enters each approved bidder/business name in the public **Business name** search, submits the search, and reads the public `caseSearchResults` table.
 
-## Implemented pieces
+The current public result table is validated against these columns:
 
-- `WccaCcapSource` is registered as source key `wcca` in the common research pipeline.
-- `/wcca-workbench.html` prepares the approved bidder name, explicit related-company aliases, and approved address context and opens the official WCCA site for the operator.
-- `/api/sources/wcca/plans`, `/api/sources/wcca/result`, and `/api/sources/wcca/status` support the workbench and persistence workflow.
-- A public WCCA run initially returns `MANUAL_REVIEW_REQUIRED`; submitting the completed workbench converts the same source task into a classified findings/no-match/ambiguous/partial/blocked result.
-- Complete no-match requires every planned bidder/alias name to be confirmed searched plus explicit operator completion confirmation.
-- Search names outside the approved bidder/related-company scope do not count toward completeness.
-- Confirmed positive evidence requires case number and matched party/business name.
-- A claimed positive whose matched party falls outside the approved bidder/related-company scope is forced to review and cannot emit `circuit_court=Y` evidence.
-- Duplicate WCCA case numbers are normalized. Exact duplicate evidence is ignored; conflicting duplicate party identities force manual review.
-- Optional case URLs are retained only when they use the official `https://wcca.wicourts.gov` host. Off-domain URLs are discarded with an explicit warning.
-- Confirmed positive cases retain case-level provenance and can support comparison-only `circuit_court=Y` evidence.
+- Case number
+- Filing date
+- County name
+- Case status
+- Name
+- Date of birth
+- Caption
+
+Case detail links are retained only when they remain on `https://wcca.wicourts.gov`.
+
+WCCA loads invisible hCaptcha on the search page. The application does not solve, inject, bypass, or reverse-engineer hCaptcha. In the normal case, WCCA permits the browser search to proceed without a human challenge and the adapter continues automatically. If WCCA presents an interactive challenge, the normal headed browser remains open for the operator to complete the challenge manually; the adapter then resumes from the resulting public results page. A challenge that is not completed before the configured timeout becomes an explicit `BLOCKED` result, never a no-match.
+
+The browser profile is persisted under `.runtime/browser-profiles/wcca` by default so normal cookies/session state can be reused between searches. Microsoft Edge is preferred on the supported Windows workstation, followed by Chrome and then a Playwright Chromium runtime if one is available.
+
+## Implemented behavior
+
+- `WccaPublicBrowserSource` is registered as source key `wcca` in the common research pipeline.
+- A normal research run now performs the public WCCA business searches instead of immediately returning `MANUAL_REVIEW_REQUIRED`.
+- The adapter searches the approved contractor name plus explicitly stored related-company aliases and does not silently broaden scope.
+- Legal-name commas are preserved. Explicit alias separators remain semicolon, pipe, and newline.
+- Every planned name must complete before a public no-match can be classified complete.
+- Search results are read from the public WCCA results table and paginated/deduplicated by case number plus matched party.
+- Exact normalized party-name matches can become confirmed positive evidence automatically.
+- Similar but non-exact party names are retained as candidates and force `AMBIGUOUS_MATCH` / human identity review rather than being accepted automatically.
+- Confirmed positive cases retain case number, filing date, county, case status, matched party, caption, and official WCCA URL.
+- Confirmed positives can support comparison-only `circuit_court=Y` evidence.
 - A complete public WCCA no-match is stored only as `wcca_public_search = NO_CURRENTLY_DISPLAYED_MATCH`; it never becomes `circuit_court=N`.
+- A blocked challenge, browser failure, layout change, incomplete pagination, or partial alias search cannot become a false negative.
+- If an earlier alias already produced a confirmed positive and a later alias becomes blocked, the positive evidence is retained while the overall source result remains incomplete/blocked.
 - `circuit_court` and `ccap_show150` automatic master-field writes remain disabled until the firm's legacy business rules are documented.
-- The public WCCA CAPTCHA/anti-scraping controls are never bypassed.
+- `/wcca-workbench.html` remains available as a manual fallback and evidence-entry/review tool; it is no longer the primary acquisition path.
+
+## Public-layout validation performed 2026-09-26
+
+The live public WCCA site was inspected before implementing this adapter. The current flow was confirmed as:
+
+1. Public WCCA acknowledgement page with an `I agree` button.
+2. Simple Case Search page containing `input[name="businessName"]` and `button[name="search"]`.
+3. Invisible hCaptcha loaded on the search page.
+4. A normal public business-name search was successfully submitted without manually solving a challenge.
+5. The returned page contained `table#caseSearchResults` with the expected seven columns, `a.case-link` case links, and normal DataTables pagination.
+
+Those selectors are treated as a source contract. If WCCA changes them, the adapter should return `LAYOUT_CHANGED` rather than reinterpret an unknown page as a clean result.
 
 ## Test coverage
 
-Deterministic tests cover search-plan alias handling, source-registry integration, operator handoff, complete and incomplete no-match behavior, confirmed positives, partial positives, required case identifiers, official case-URL enforcement, out-of-scope party protection, conflicting duplicate-case protection, unexpected search names, and the rule that WCCA evidence cannot create master proposals while field ownership is disabled.
+Deterministic coverage now tests the live-browser source contract as well as the legacy evidence-normalization rules. The browser-source tests cover complete no-match, exact positive match, similar-name ambiguity, human-challenge timeout, layout change, browser unavailability, retention of earlier positive evidence after a later challenge, registry integration, and the no-REST/no-CAPTCHA-bypass contract.
 
-## Remaining source-completion items
+The CI run after registration of the live browser adapter passed the backend suite, frontend build, and Windows launcher checks with **233 backend tests passing**.
 
-The adapter implementation itself is complete. The WCCA source should remain **Ongoing** on the project board until the non-code acceptance items are satisfied:
+## Remaining acceptance item
 
-1. Confirm the firm's exact operational rule for `circuit_court`.
-2. Define the legacy `ccap_show150` field, if it is still needed.
-3. Walk the workbench through at least one representative known-positive bidder and one representative public no-match bidder.
-4. Confirm the workbench captures the information the paralegals actually use without collecting unnecessary court data.
-5. Enable any future master-field ownership only after those business rules are written and fixture-tested.
+The code path is implemented and CI-tested. The remaining acceptance step is a live run of the actual application on the supported Windows workstation against the approved bidder list so the local Edge/Chrome session, WCCA hCaptcha behavior, and result extraction are exercised end-to-end in the same environment the paralegal will use.
 
-This distinction is intentional: **adapter complete** does not mean **source acceptance complete**, and it does not justify weakening WCCA's public-record limitations or bypassing the site's access controls.
+Do not replace this public-browser path with the paid WCCA REST API unless the project requirements are explicitly changed in the future.
