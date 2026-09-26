@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 from pathlib import Path
 import zipfile
 
+import httpx
 import pytest
 
 from app.research.sources.osha_bulk import ARCHIVE_FILENAME, INDEX_FILENAME, METADATA_FILENAME
@@ -22,16 +24,31 @@ CSV = """activity_nr,reporting_id,estab_name,site_address,site_city,site_state,s
 """
 
 
+def archive_bytes(csv_text: str = CSV) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as output:
+        output.writestr("osha_inspection_000.csv", csv_text)
+    return buffer.getvalue()
+
+
 def make_archive(path: Path, csv_text: str = CSV, *, mtime: datetime | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as output:
-        output.writestr("osha_inspection_000.csv", csv_text)
+    path.write_bytes(archive_bytes(csv_text))
     if mtime is not None:
         timestamp = mtime.timestamp()
-        path.touch()
         import os
         os.utime(path, (timestamp, timestamp))
     return path
+
+
+def seed_remote_identity(cache_dir: Path, *, etag: str, last_modified: str) -> dict:
+    metadata_path = cache_dir / METADATA_FILENAME
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["http_etag"] = etag
+    metadata["http_last_modified"] = last_modified
+    metadata["archive_bytes"] = (cache_dir / ARCHIVE_FILENAME).stat().st_size
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    return metadata
 
 
 def test_operational_cache_is_stable_and_can_be_explicitly_overridden(tmp_path, monkeypatch):
@@ -39,7 +56,7 @@ def test_operational_cache_is_stable_and_can_be_explicitly_overridden(tmp_path, 
     assert default_operational_cache_dir() == (tmp_path / "shared-osha").resolve()
 
 
-def test_rebuilding_cached_archive_preserves_source_download_freshness(tmp_path):
+def test_unchanged_remote_identity_recertifies_old_snapshot_without_get(tmp_path):
     old = datetime.now(timezone.utc) - timedelta(days=40)
     archive = make_archive(tmp_path / ARCHIVE_FILENAME, mtime=old)
     first = refresh_operational_osha_index(
@@ -47,24 +64,94 @@ def test_rebuilding_cached_archive_preserves_source_download_freshness(tmp_path)
         source_archive=archive,
         minimum_record_count=0,
     )
-    # Simulate the archive having been downloaded 40 days ago. Rebuilding the local
-    # SQLite index must not relabel that source snapshot as newly downloaded.
     metadata_path = tmp_path / METADATA_FILENAME
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = seed_remote_identity(
+        tmp_path,
+        etag='"same-object"',
+        last_modified="Fri, 25 Sep 2026 11:04:31 GMT",
+    )
     metadata["downloaded_at"] = old.isoformat()
+    metadata["freshness_as_of"] = old.isoformat()
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
-    rebuilt = refresh_operational_osha_index(
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        assert request.method == "HEAD"
+        return httpx.Response(
+            200,
+            headers={
+                "etag": '"same-object"',
+                "last-modified": "Fri, 25 Sep 2026 11:04:31 GMT",
+                "content-length": str(archive.stat().st_size),
+                "accept-ranges": "bytes",
+            },
+            request=request,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    verified = refresh_operational_osha_index(
         cache_dir=tmp_path,
         force_download=False,
         minimum_record_count=0,
+        client=client,
     )
 
-    assert rebuilt["downloaded_at"] == old.isoformat()
-    assert rebuilt["index_built_at"] != first["index_built_at"]
+    assert methods == ["HEAD"]
+    assert verified["downloaded_at"] == old.isoformat()
+    assert verified["index_built_at"] == first["index_built_at"]
+    assert verified["snapshot_freshness_basis"] == "remote_identity_verified"
     state = inspect_operational_snapshot(tmp_path)
-    assert state["stale"] is True
-    assert state["age_days"] >= 39
+    assert state["stale"] is False
+    assert state["age_days"] is not None and state["age_days"] < 1
+    assert state["source_checked_at"] == verified["source_checked_at"]
+
+
+def test_changed_remote_identity_downloads_and_replaces_snapshot(tmp_path):
+    old_archive = make_archive(tmp_path / ARCHIVE_FILENAME)
+    refresh_operational_osha_index(
+        cache_dir=tmp_path,
+        source_archive=old_archive,
+        minimum_record_count=0,
+    )
+    seed_remote_identity(
+        tmp_path,
+        etag='"old-object"',
+        last_modified="Thu, 24 Sep 2026 11:04:31 GMT",
+    )
+
+    new_csv = CSV.replace("Other Mechanical LLC", "Replacement Mechanical LLC")
+    new_body = archive_bytes(new_csv)
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        headers = {
+            "etag": '"new-object"',
+            "last-modified": "Fri, 25 Sep 2026 11:04:31 GMT",
+            "content-length": str(len(new_body)),
+            "accept-ranges": "bytes",
+        }
+        if request.method == "HEAD":
+            return httpx.Response(200, headers=headers, request=request)
+        if request.method == "GET":
+            return httpx.Response(200, headers=headers, content=new_body, request=request)
+        raise AssertionError(f"unexpected method: {request.method}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    refreshed = refresh_operational_osha_index(
+        cache_dir=tmp_path,
+        force_download=False,
+        minimum_record_count=0,
+        client=client,
+    )
+
+    assert methods == ["HEAD", "GET"]
+    assert refreshed["http_etag"] == '"new-object"'
+    assert refreshed["snapshot_freshness_basis"] == "downloaded_current_remote_object"
+    assert refreshed["record_count"] == 2
+    assert (tmp_path / ARCHIVE_FILENAME).read_bytes() == new_body
 
 
 def test_failed_refresh_preserves_last_known_good_index_and_metadata(tmp_path):
