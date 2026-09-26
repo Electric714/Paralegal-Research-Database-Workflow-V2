@@ -1,4 +1,4 @@
-"""Download DOL's complete OSHA inspection dataset and build the local search index."""
+"""Verify or refresh DOL's complete OSHA inspection snapshot and local search index."""
 from __future__ import annotations
 
 import argparse
@@ -20,28 +20,30 @@ from app.research.sources.osha_operational import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Refresh the local OSHA inspection index from the official U.S. Department "
-            "of Labor complete-dataset download. The download/index is staged and only "
-            "promoted after validation succeeds."
+            "Verify/refresh the local OSHA inspection index from the official U.S. "
+            "Department of Labor complete dataset. Existing snapshots are first checked "
+            "with the remote ETag/Last-Modified identity, so an unchanged 1+ GiB ZIP is "
+            "not downloaded again. Changed downloads are staged and promoted only after "
+            "validation succeeds."
         )
     )
     parser.add_argument(
         "--source-archive",
         type=Path,
-        help="Build from an already-downloaded OSHA_inspection.zip instead of downloading it.",
+        help="Build from an operator-provided OSHA_inspection.zip instead of the live DOL object.",
     )
     parser.add_argument(
         "--reuse-cached-archive",
         action="store_true",
         help=(
-            "Reuse the cached OSHA ZIP instead of downloading a current snapshot. "
-            "This rebuilds the index but preserves the archive's original freshness timestamp."
+            "Compatibility flag. Normal refresh already reuses the cached archive when "
+            "the official remote ETag/Last-Modified proves it is unchanged."
         ),
     )
     parser.add_argument(
         "--force-download",
         action="store_true",
-        help="Explicitly download a current official OSHA snapshot (normal refresh behavior).",
+        help="Redownload the official OSHA ZIP even when the cached remote identity still matches.",
     )
     parser.add_argument(
         "--delete-archive",
@@ -57,8 +59,8 @@ def main() -> int:
 
     if args.source_archive is not None and not args.source_archive.exists():
         parser.error(f"Source archive does not exist: {args.source_archive}")
-    if args.source_archive is not None and args.reuse_cached_archive:
-        parser.error("--source-archive and --reuse-cached-archive cannot be combined")
+    if args.source_archive is not None and args.force_download:
+        parser.error("--source-archive and --force-download cannot be combined")
 
     cache_dir = default_operational_cache_dir()
     if args.status_only:
@@ -68,24 +70,24 @@ def main() -> int:
     print(f"OSHA official bulk source: {DOL_OSHA_BULK_URL}")
     print(f"Operational OSHA cache: {cache_dir}")
     if args.source_archive is None:
-        if args.reuse_cached_archive:
-            print("Rebuilding from the cached OSHA ZIP without changing its freshness date...")
+        if args.force_download:
+            print("Forcing a new official complete-dataset download and validated index rebuild...")
         else:
-            print("Downloading a current official complete dataset, validating it, and rebuilding the local index...")
+            print(
+                "Checking the official remote ETag/Last-Modified first; the large ZIP is "
+                "downloaded only when missing or changed..."
+            )
     else:
-        print(f"Building the local index from: {args.source_archive}")
+        print(f"Building the local index from operator-provided archive: {args.source_archive}")
 
     metadata = refresh_operational_osha_index(
         cache_dir=cache_dir,
         source_archive=args.source_archive,
-        force_download=(
-            args.source_archive is None
-            and (args.force_download or not args.reuse_cached_archive)
-        ),
+        force_download=bool(args.force_download),
         keep_archive=not args.delete_archive,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
-    print("OSHA bulk index refresh complete.")
+    print("OSHA snapshot/index verification complete.")
     return 0
 
 
