@@ -45,6 +45,20 @@ _CLOSED_12M_RE = re.compile(
     re.IGNORECASE,
 )
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]*)?\(?\d{3}\)?[\s.-]+\d{3}[\s.-]+\d{4}(?!\d)")
+_COMPLAINT_HEADING_RE = re.compile(
+    r"^#{1,6}\s+(?:Customer\s+)?Complaints\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SUMMARY_HEADING_RE = re.compile(
+    r"^#{1,6}\s+Customer\s+Complaints\s+Summary\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SUMMARY_END_MARKERS = (
+    "if you've experienced an issue",
+    "if you’ve experienced an issue",
+    "filter and sort by",
+    "initial complaint",
+)
 
 
 class BbbReaderError(RuntimeError):
@@ -133,16 +147,55 @@ def parse_search_profiles(text: str) -> tuple[list[BbbProfile], int | None]:
     return profiles, total
 
 
+def _complaint_summary_region(text: str) -> str:
+    """Return only BBB's published complaint-summary area from Reader markdown.
+
+    Some BBB profiles render a top-level ``# Complaints`` heading while profiles
+    with location/pagination content can expose ``## Customer Complaints Summary``
+    as the first useful complaint heading. Prefer the specific summary heading so
+    long location/navigation blocks cannot push the official counts outside an
+    arbitrary prefix window. The region ends before complaint-submission controls
+    or individual complaint prose so numbers in a complaint body are never treated
+    as BBB's aggregate summary.
+    """
+    source = text or ""
+    summary_heading = _SUMMARY_HEADING_RE.search(source)
+    complaints_heading = _COMPLAINT_HEADING_RE.search(source)
+    if summary_heading:
+        source = source[summary_heading.start():]
+    elif complaints_heading:
+        source = source[complaints_heading.start():]
+
+    plain = plain_markdown(source)
+    lower = plain.casefold()
+
+    summary_marker = lower.find("customer complaints summary")
+    if summary_marker >= 0:
+        start = summary_marker
+    else:
+        # Compact zero-complaint pages may omit the Summary heading entirely.
+        # A recognized aggregate count is also a safe anchor when Reader strips
+        # heading markup but leaves BBB's official summary text intact.
+        anchors = [match for match in (_ZERO_RE.search(plain), _TOTAL_3Y_RE.search(plain)) if match]
+        if anchors:
+            start = min(match.start() for match in anchors)
+        else:
+            start = lower.find("complaints")
+            if start < 0:
+                start = 0
+
+    ends = [
+        index
+        for marker in _SUMMARY_END_MARKERS
+        if (index := lower.find(marker, start + 1)) >= 0
+    ]
+    end = min(ends) if ends else min(len(plain), start + 5000)
+    return plain[start:end]
+
+
 def parse_complaint_summary(text: str) -> tuple[int | None, int | None]:
     """Read BBB's published complaint summary from Reader markdown."""
-    # Reader includes a long navigation menu and a title containing "Complaints".
-    # Anchor to the actual section before applying the bounded summary window.
-    heading = re.search(r"^#{1,6}\s+(?:Customer\s+)?Complaints\s*$", text or '', re.IGNORECASE | re.MULTILINE)
-    if heading:
-        text = text[heading.start():]
-    plain = plain_markdown(text)
-    marker = plain.casefold().find("complaints")
-    region = plain[marker: marker + 3000] if marker >= 0 else plain[:3000]
+    region = _complaint_summary_region(text)
 
     if _ZERO_RE.search(region):
         return 0, None
