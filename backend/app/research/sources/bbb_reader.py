@@ -161,28 +161,37 @@ def _complaint_summary_region(text: str) -> str:
     source = text or ""
     summary_heading = _SUMMARY_HEADING_RE.search(source)
     complaints_heading = _COMPLAINT_HEADING_RE.search(source)
+    anchored_to_heading = False
     if summary_heading:
         source = source[summary_heading.start():]
+        anchored_to_heading = True
     elif complaints_heading:
         source = source[complaints_heading.start():]
+        anchored_to_heading = True
 
     plain = plain_markdown(source)
     lower = plain.casefold()
 
-    summary_marker = lower.find("customer complaints summary")
-    if summary_marker >= 0:
-        start = summary_marker
+    if anchored_to_heading:
+        # Keep the start at the recognized BBB heading. Moving the start forward
+        # to a later count could jump across "Initial Complaint" and accidentally
+        # parse numbers from customer prose when the official summary is absent.
+        start = 0
     else:
-        # Compact zero-complaint pages may omit the Summary heading entirely.
-        # A recognized aggregate count is also a safe anchor when Reader strips
-        # heading markup but leaves BBB's official summary text intact.
-        anchors = [match for match in (_ZERO_RE.search(plain), _TOTAL_3Y_RE.search(plain)) if match]
-        if anchors:
-            start = min(match.start() for match in anchors)
+        summary_marker = lower.find("customer complaints summary")
+        if summary_marker >= 0:
+            start = summary_marker
         else:
-            start = lower.find("complaints")
-            if start < 0:
-                start = 0
+            # Reader occasionally strips heading markup. In that case, aggregate
+            # BBB wording is a safe fallback anchor, still bounded before any
+            # complaint-submission or individual-complaint section below.
+            anchors = [match for match in (_ZERO_RE.search(plain), _TOTAL_3Y_RE.search(plain)) if match]
+            if anchors:
+                start = min(match.start() for match in anchors)
+            else:
+                start = lower.find("complaints")
+                if start < 0:
+                    start = 0
 
     ends = [
         index
