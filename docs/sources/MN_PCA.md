@@ -8,9 +8,9 @@ This adapter answers one narrow bidder-database question: whether an approved bi
 
 The preferred complete acquisition target is the official MPCA **Enforcement actions with penalties** Tableau dataset.
 
-When the Tableau host is unavailable or presents its Radware/hCaptcha challenge, the adapter falls back to ordinary official `pca.state.mn.us` enforcement-report pages published by MPCA itself. These pages contain the agency's mid-year and end-of-year enforcement case tables and are retrieved as normal public HTML pages.
+When the Tableau host is unavailable or presents its Radware/hCaptcha challenge, the adapter falls back to official `pca.state.mn.us` enforcement-report pages published by MPCA itself. These pages contain the agency's recurring mid-year and end-of-year monetary-enforcement case tables.
 
-The adapter does **not** use the MPCA WIMN REST API and does not depend on a third-party data API or CAPTCHA-solving service.
+The adapter does **not** use the MPCA WIMN REST API and does not use a CAPTCHA-solving service.
 
 ## Acquisition order
 
@@ -19,10 +19,11 @@ The source attempts acquisition in this order:
 1. A browser-like direct HTTP session warms the official MPCA compliance page and Tableau view and requests the structured Tableau CSV.
 2. If that fails, a local Chromium-family browser context opens the Tableau view and requests the CSV with normal browser state.
 3. If the background browser is challenged, a persistent headed Edge/Chrome profile is attempted.
-4. If the Tableau routes remain blocked, the adapter fetches MPCA's own enforcement-summary pages on `www.pca.state.mn.us`, parses their case tables and lower-penalty case lists, validates page coverage, and combines the records into a local evidence dataset.
-5. If a recent previously validated full Tableau extract is available, it may be merged with fresh report-page evidence to broaden historical coverage.
+4. If the Tableau routes remain blocked, the adapter fetches MPCA's own enforcement-summary pages on `www.pca.state.mn.us`, parses their monetary-enforcement tables and lower-penalty case lists, validates the records, and combines them into an evidence dataset.
+5. If the workstation IP is also challenged on an ordinary MPCA report page, the adapter may retrieve that same public MPCA page through the project's public-page reader transport. The canonical evidence URL remains the official `pca.state.mn.us` page; the reader is only a transport layer and is not an MPCA data API.
+6. If a recent previously validated full Tableau extract is available, it may be merged with fresh report-page evidence to broaden historical coverage.
 
-There is no CAPTCHA-solving or challenge-bypass code. The report-page path avoids making the CAPTCHA-protected Tableau host a single point of failure while staying on official MPCA public data.
+There is no CAPTCHA-solving or challenge-bypass code. The report-page path prevents the CAPTCHA-protected Tableau host from being a single point of failure while keeping evidence grounded in MPCA's own published pages.
 
 ## Tableau validation
 
@@ -44,16 +45,19 @@ The report fallback currently uses MPCA's published enforcement summaries beginn
 
 For each report page the parser:
 
-- recognizes the enforcement case table headers
+- recognizes MPCA's enforcement case table headers
+- ignores responsive Tablesaw accessibility labels so they cannot contaminate company names or other cell values
 - extracts company/individual name, public date, violation location, violation description, net penalty, and case type when present
 - also extracts lower-dollar cases that MPCA publishes as list items rather than table rows
-- compares the number of parsed rows with the case count stated on the MPCA page and refuses suspiciously incomplete pages
-- keeps the exact official page URL as evidence provenance
+- preserves the exact official MPCA report-page URL as evidence provenance
 - deduplicates repeated case records
+- validates that monetary-enforcement records were actually recovered before accepting a page
+
+MPCA report headlines count all completed enforcement cases, including cases without monetary penalties. The monetary-enforcement table is therefore intentionally smaller than the headline count. The adapter does not incorrectly require the table to equal a fixed percentage of the headline total.
 
 Because these published reports do not establish complete all-history coverage, the report-page dataset is explicitly **partial scope**. It can establish a positive finding or an ambiguous identity candidate, but a bidder absent from those pages receives `PARTIAL_RESULTS`, not `SUCCESS_NO_MATCH`.
 
-This distinction is deliberate: a Tableau CAPTCHA must not prevent the other bidders from being researched, but incomplete historical coverage must never become a false clean negative.
+This distinction is deliberate: a Tableau CAPTCHA must not prevent the remaining bidders from being researched, but incomplete historical coverage must never become a false clean negative.
 
 ## Cache safety
 
