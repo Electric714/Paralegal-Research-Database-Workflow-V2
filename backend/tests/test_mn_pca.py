@@ -18,6 +18,7 @@ from app.research.sources.mn_pca import (
     MpcaDatasetError,
     parse_mpca_csv,
 )
+from app.research.sources.mn_pca_reports import parse_report_page
 from app.research.sources.public_browser import BrowserBlockedError
 
 
@@ -36,6 +37,16 @@ BROKEN_TABLEAU_SUMMARY_CSV = """YEAR(Enforcement Action Date),AGG(Number of Case
 
 CAPTCHA_HTML = """<!DOCTYPE html><html><title>Radware Captcha Page</title>
 <body>We apologize for the inconvenience. hCaptcha</body></html>"""
+
+REPORT_URL = "https://www.pca.state.mn.us/news-and-stories/mpca-completes-2-enforcement-cases-in-first-half-of-2026"
+REPORT_HTML = """<!doctype html><html><body>
+<h1>MPCA completed 2 enforcement cases in first half of 2026</h1>
+<table>
+<tr><th>Public date</th><th>Company or individual(s)</th><th>Violation location</th><th>Violation description</th><th>Net penalty</th><th>Case type</th></tr>
+<tr><td>03/05/2026</td><td>Acme Construction LLC</td><td>Minneapolis</td><td>Construction stormwater</td><td>$9,663</td><td>Administrative penalty order</td></tr>
+</table>
+<ul><li>Other Builder Inc, for hazardous waste violations in St Paul, $1,200.</li></ul>
+</body></html>"""
 
 
 def contractor(*, name: str = "Acme Construction, LLC", related: str = "") -> ContractorContext:
@@ -57,6 +68,7 @@ def direct_source(
     min_expected_records: int = 1,
     cache_path: str | None = None,
     allow_cached_fallback: bool = False,
+    allow_report_fallback: bool = False,
 ) -> tuple[MinnesotaPcaEnforcementSource, list[str]]:
     requested: list[str] = []
 
@@ -82,6 +94,7 @@ def direct_source(
         min_expected_records=min_expected_records,
         allow_browser_fallback=False,
         allow_cached_fallback=allow_cached_fallback,
+        allow_report_fallback=allow_report_fallback,
         cache_path=cache_path,
     )
     return source, requested
@@ -111,6 +124,42 @@ class FakeBrowserSession:
         self.closed = True
 
 
+def report_fallback_source() -> tuple[MinnesotaPcaEnforcementSource, list[str]]:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        requested.append(url)
+        if request.url.host == "services.pca.state.mn.us":
+            raise AssertionError("MPCA adapter must not use the REST API")
+        if url == LANDING_URL:
+            return httpx.Response(
+                200,
+                text=CAPTCHA_HTML,
+                headers={"content-type": "text/html"},
+                request=request,
+            )
+        if url == REPORT_URL:
+            return httpx.Response(
+                200,
+                text=REPORT_HTML,
+                headers={"content-type": "text/html; charset=utf-8"},
+                request=request,
+            )
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    source = MinnesotaPcaEnforcementSource(
+        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
+        allow_browser_fallback=False,
+        allow_cached_fallback=False,
+        allow_report_fallback=True,
+        report_urls=(REPORT_URL,),
+        discover_report_urls=False,
+        report_min_records=1,
+    )
+    return source, requested
+
+
 def test_parser_validates_and_reads_official_export_shape():
     records, digest = parse_mpca_csv(CSV)
     assert len(records) == 2
@@ -135,6 +184,18 @@ def test_missing_required_columns_fails_closed():
         pass
     else:
         raise AssertionError("expected MpcaDatasetError")
+
+
+def test_report_page_parser_reads_table_and_low_penalty_bullets():
+    records, expected = parse_report_page(REPORT_HTML, source_url=REPORT_URL)
+
+    assert expected == 2
+    assert len(records) == 2
+    assert records[0]["Company or individual(s)"] == "Acme Construction LLC"
+    assert records[0]["Net penalty"] == "$9,663"
+    assert records[0]["Source URL"] == REPORT_URL
+    assert records[1]["Company or individual(s)"] == "Other Builder Inc"
+    assert records[1]["Net penalty"] == "$1,200"
 
 
 def test_default_path_uses_tableau_and_never_rest_api():
@@ -186,6 +247,7 @@ def test_captcha_on_direct_export_uses_browser_context_tableau_export():
         browser_session_factory=browser_factory,
         min_expected_records=1,
         allow_cached_fallback=False,
+        allow_report_fallback=False,
     )
     result = source.search(contractor())
 
@@ -221,6 +283,7 @@ def test_headless_browser_block_then_persistent_system_browser_succeeds():
         browser_profile_dir="test-profile",
         min_expected_records=1,
         allow_cached_fallback=False,
+        allow_report_fallback=False,
     )
     result = source.search(contractor())
 
@@ -231,6 +294,44 @@ def test_headless_browser_block_then_persistent_system_browser_succeeds():
     assert factory_calls[0]["profile_dir"] is None
     assert factory_calls[1]["headless"] is False
     assert factory_calls[1]["profile_dir"] == "test-profile"
+
+
+def test_tableau_captcha_falls_through_to_official_mpca_report_pages():
+    source, requested = report_fallback_source()
+    result = source.search(contractor())
+
+    assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
+    assert result.completeness_status == CompletenessStatus.PARTIAL
+    assert result.acquisition_method == "official_mpca_enforcement_report_pages"
+    assert result.evidence[0].observed_value == "Y"
+    assert result.evidence[0].source_url == REPORT_URL
+    assert result.normalized_payload["dataset_partial_scope"] is True
+    assert result.normalized_payload["report_page_count"] == 1
+    assert result.normalized_payload["rest_api_used"] is False
+    assert REPORT_URL in requested
+    assert all("services.pca.state.mn.us" not in url for url in requested)
+
+
+def test_report_fallback_no_match_is_partial_never_clean_negative():
+    source, _ = report_fallback_source()
+    result = source.search(contractor(name="No Such Contractor LLC"))
+
+    assert result.status == SourceResultStatus.PARTIAL_RESULTS
+    assert result.completeness_status == CompletenessStatus.PARTIAL
+    assert result.is_clean_negative is False
+    assert result.evidence == []
+    assert result.normalized_payload["classification"] == "PARTIAL_NO_MATCH"
+    assert "not a clean negative" in result.warnings[-1]
+
+
+def test_report_fallback_similar_name_still_requires_review():
+    source, _ = report_fallback_source()
+    result = source.search(contractor(name="Acme Construction Services LLC"))
+
+    assert result.status == SourceResultStatus.AMBIGUOUS_MATCH
+    assert result.identity_status == IdentityStatus.REVIEW_REQUIRED
+    assert result.completeness_status == CompletenessStatus.PARTIAL
+    assert result.is_clean_negative is False
 
 
 def test_approved_alias_can_confirm():
