@@ -26,6 +26,8 @@ BROKEN_TABLEAU_SUMMARY_CSV = """YEAR(Enforcement Action Date),AGG(Number of Case
 2026,147
 """
 
+CAPTCHA_HTML = "<!DOCTYPE html><html><title>Radware Captcha Page</title></html>"
+
 
 def contractor(*, name: str = "Acme Construction, LLC", related: str = "") -> ContractorContext:
     return ContractorContext(internal_id=7, external_id="B-7", contractor_name=name, related_companies=related, city="Minneapolis", state="MN")
@@ -44,6 +46,8 @@ def source_for_wimn_fallback(
     actions: list[dict] | None = None,
     sites_status: int = 200,
     actions_status: int = 200,
+    tableau_body: str = BROKEN_TABLEAU_SUMMARY_CSV,
+    tableau_content_type: str = "text/csv",
 ) -> MinnesotaPcaEnforcementSource:
     sites = sites if sites is not None else []
     actions = actions if actions is not None else []
@@ -53,8 +57,8 @@ def source_for_wimn_fallback(
         if url == CSV_EXPORT_URL:
             return httpx.Response(
                 200,
-                text=BROKEN_TABLEAU_SUMMARY_CSV,
-                headers={"content-type": "text/csv"},
+                text=tableau_body,
+                headers={"content-type": tableau_content_type},
                 request=request,
             )
         if request.url.path == "/api/v1/wimn/sites":
@@ -103,13 +107,19 @@ def test_missing_required_columns_fails_closed():
         raise AssertionError("expected MpcaDatasetError")
 
 
-def test_captcha_is_reported_as_blocked_not_a_parser_failure():
-    source = source_for('<!DOCTYPE html><html><title>Radware Captcha Page</title></html>', content_type='text/html')
-    result = source.search(contractor())
-    assert result.status == SourceResultStatus.BLOCKED
-    assert result.completeness_status == CompletenessStatus.UNKNOWN
+def test_captcha_falls_back_to_official_wimn_api():
+    result = source_for_wimn_fallback(
+        sites=[],
+        tableau_body=CAPTCHA_HTML,
+        tableau_content_type="text/html",
+    ).search(contractor(name="No Such Contractor LLC"))
+
+    assert result.status == SourceResultStatus.SUCCESS_NO_MATCH
+    assert result.completeness_status == CompletenessStatus.COMPLETE
+    assert result.is_clean_negative is True
+    assert result.acquisition_method == "official_wimn_rest_fallback"
+    assert "CAPTCHA" in result.normalized_payload["tableau_fallback_reason"]
     assert result.evidence == []
-    assert 'human verification' in result.warnings[0]
 
 
 def test_exact_normalized_name_is_confirmed_and_proposes_environmental_violation():
