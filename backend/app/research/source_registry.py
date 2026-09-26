@@ -12,7 +12,7 @@ from .sources.runtime_status_adapters import (
     OperationalWisdotContractorSource,
 )
 from .sources.violation_tracker import ViolationTrackerSource
-from .sources.wcca import WccaOperatorAssistedSource
+from .sources.wcca import WccaCcapSource
 from .sources.wdfi import WdfiCorporateRecordsSource
 
 
@@ -25,7 +25,7 @@ SOURCE_ADAPTERS: dict[str, type[ResearchSource]] = {
     "responsible_mn": ResponsibleMinnesotaSource,
     "sam": OperationalSamUploadedExclusionsSource,
     "violation_tracker": ViolationTrackerSource,
-    "wcca": WccaOperatorAssistedSource,
+    "wcca": WccaCcapSource,
     "wdfi": WdfiCorporateRecordsSource,
     "wisdot": OperationalWisdotContractorSource,
 }
