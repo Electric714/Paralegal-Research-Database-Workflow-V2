@@ -1,0 +1,61 @@
+name: OSHA Live Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      bidder_limit:
+        description: Number of example bidders to audit (0 = all)
+        required: false
+        default: "24"
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/osha-live-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  real-osha-bulk-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download, validate, index, and audit official OSHA data
+        shell: bash
+        env:
+          INPUT_LIMIT: ${{ github.event.inputs.bidder_limit || '24' }}
+        run: |
+          python scripts/osha_live_audit.py \
+            --bidder-csv "Bidder Database-Example.csv" \
+            --limit "$INPUT_LIMIT" \
+            --timeout 600 \
+            --refresh force
+
+      - name: Show OSHA snapshot status
+        if: always()
+        run: python scripts/refresh_osha_bulk.py --status-only
+
+      - name: Upload live acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: osha-live-acceptance-${{ github.run_id }}
+          path: |
+            .runtime/osha-preflight-latest.json
+            .runtime/live-audits/**
+          if-no-files-found: warn
+          retention-days: 14
