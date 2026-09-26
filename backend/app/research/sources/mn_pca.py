@@ -158,7 +158,7 @@ def _has_monetary_penalty(value: object) -> bool:
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.1.0"
+    adapter_version = "1.1.1"
     parser_version = "1.0.1"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
@@ -368,7 +368,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
 
         warnings = [
             tableau_warning,
-            "MPCA Tableau detail export no longer exposed the expected regulated-party schema; used the official MPCA WIMN REST API fallback.",
+            "MPCA Tableau detail export was unavailable or unusable; used the official MPCA WIMN REST API fallback.",
         ]
 
         if evidence:
@@ -441,7 +441,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
 
         if self.prepare_error:
             status, warning, http_status = self.prepare_error
-            if status == SourceResultStatus.DATASET_MALFORMED:
+            if status == SourceResultStatus.DATASET_MALFORMED or (
+                status == SourceResultStatus.BLOCKED and "CAPTCHA" in warning.upper()
+            ):
                 return self._search_wimn_fallback(contractor, warning)
             return self.validate_result(SourceResult(
                 source_key=self.source_key, contractor_id=contractor.internal_id, status=status,
