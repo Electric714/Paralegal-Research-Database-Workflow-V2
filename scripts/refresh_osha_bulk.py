@@ -29,9 +29,12 @@ def main() -> int:
         help="Build from an already-downloaded OSHA_inspection.zip instead of downloading it.",
     )
     parser.add_argument(
-        "--force-download",
+        "--reuse-cached-archive",
         action="store_true",
-        help="Redownload the official OSHA ZIP even if a cached archive is present.",
+        help=(
+            "Reuse the cached OSHA ZIP instead of downloading a current snapshot. "
+            "Use only for rebuilding/debugging; a normal refresh downloads the official file again."
+        ),
     )
     parser.add_argument(
         "--delete-archive",
@@ -45,13 +48,16 @@ def main() -> int:
 
     print(f"OSHA official bulk source: {DOL_OSHA_BULK_URL}")
     if args.source_archive is None:
-        print("Downloading/using the official complete dataset and rebuilding the local index...")
+        if args.reuse_cached_archive:
+            print("Reusing the cached official OSHA ZIP and rebuilding the local index...")
+        else:
+            print("Downloading the current official complete dataset and rebuilding the local index...")
     else:
         print(f"Building the local index from: {args.source_archive}")
 
     metadata = refresh_official_bulk_index(
         source_archive=args.source_archive,
-        force_download=args.force_download,
+        force_download=args.source_archive is None and not args.reuse_cached_archive,
         keep_archive=not args.delete_archive,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
