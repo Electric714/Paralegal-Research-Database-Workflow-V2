@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from html import unescape
+from time import sleep
 from typing import Callable
 
 import httpx
@@ -33,6 +34,8 @@ OSHA_BROWSER_HOSTS = {
     "osha.prod.pace.dol.gov",
     "edit-ita.osha.gov",
 }
+TRANSIENT_SEARCH_STATUS_CODES = frozenset({500, 502, 503, 504})
+SEARCH_RETRY_DELAYS_SECONDS = (0.5, 1.5)
 
 
 def _explicit_no_results(html: str) -> bool:
@@ -72,10 +75,12 @@ class ResilientOshaEstablishmentSource(OshaEstablishmentSource):
     OSHA's public IMIS search can reject bare HTTP clients with 403 even when the same
     public query works in a normal browser. This adapter first uses a warmed HTTP session
     with ordinary browser headers; only a 403 triggers a real local browser session.
-    Explicit 429 rate limits are never bypassed.
+    Explicit 429 rate limits are never bypassed. Transient gateway/server failures and
+    request timeouts are retried with a short bounded backoff before the run is allowed
+    to classify OSHA as unavailable.
     """
 
-    adapter_version = "1.3.0"
+    adapter_version = "1.4.0"
     parser_version = "1.2.0"
 
     def __init__(
@@ -105,6 +110,7 @@ class ResilientOshaEstablishmentSource(OshaEstablishmentSource):
                 "browser_fallback": "system_edge_or_chrome_on_http_403",
                 "rate_limit_policy": "HTTP 429 is never bypassed",
                 "zero_result_layout": "current OSHA establishment.html redirect supported",
+                "transient_retry_policy": "3 attempts for HTTP 500/502/503/504 and request timeouts",
             }
         )
         return result
@@ -136,6 +142,15 @@ class ResilientOshaEstablishmentSource(OshaEstablishmentSource):
             )
         except httpx.HTTPError:
             pass
+
+    def _prepare_transient_retry(self, delay_seconds: float) -> None:
+        # Re-run the ordinary public-page warmup for our production client in case the
+        # gateway failure was tied to stale edge/session state. Injected test clients do
+        # not get extra warmup traffic, so request-count assertions stay deterministic.
+        if self._owns_http_client:
+            self._http_warmed = False
+        sleep(delay_seconds)
+        self._warm_http_session()
 
     @staticmethod
     def _search_params(
@@ -169,19 +184,44 @@ class ResilientOshaEstablishmentSource(OshaEstablishmentSource):
     ):
         self._warm_http_session()
         params = self._search_params(search_name, state, start_date, end_date)
+        response: httpx.Response | None = None
+        attempts_used = 0
 
-        try:
-            response = self.client.get(SEARCH_URL, params=params)
-        except httpx.TimeoutException as exc:
-            raise OshaFetchError(
-                f"OSHA search timed out for {search_name!r}.",
-                status=SourceResultStatus.TIMEOUT,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise OshaFetchError(
-                f"OSHA search request failed for {search_name!r}: {exc}",
-                status=SourceResultStatus.HTTP_ERROR,
-            ) from exc
+        for attempt_index in range(len(SEARCH_RETRY_DELAYS_SECONDS) + 1):
+            attempts_used = attempt_index + 1
+            try:
+                response = self.client.get(SEARCH_URL, params=params)
+            except httpx.TimeoutException as exc:
+                if attempt_index < len(SEARCH_RETRY_DELAYS_SECONDS):
+                    self._prepare_transient_retry(SEARCH_RETRY_DELAYS_SECONDS[attempt_index])
+                    continue
+                raise OshaFetchError(
+                    f"OSHA search timed out for {search_name!r} after {attempts_used} attempts.",
+                    status=SourceResultStatus.TIMEOUT,
+                ) from exc
+            except httpx.RequestError as exc:
+                if attempt_index < len(SEARCH_RETRY_DELAYS_SECONDS):
+                    self._prepare_transient_retry(SEARCH_RETRY_DELAYS_SECONDS[attempt_index])
+                    continue
+                raise OshaFetchError(
+                    f"OSHA search request failed for {search_name!r} after {attempts_used} attempts: {exc}",
+                    status=SourceResultStatus.HTTP_ERROR,
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise OshaFetchError(
+                    f"OSHA search request failed for {search_name!r}: {exc}",
+                    status=SourceResultStatus.HTTP_ERROR,
+                ) from exc
+
+            if (
+                response.status_code in TRANSIENT_SEARCH_STATUS_CODES
+                and attempt_index < len(SEARCH_RETRY_DELAYS_SECONDS)
+            ):
+                self._prepare_transient_retry(SEARCH_RETRY_DELAYS_SECONDS[attempt_index])
+                continue
+            break
+
+        assert response is not None
 
         if response.status_code in {401, 407}:
             raise OshaFetchError(
@@ -221,8 +261,13 @@ class ResilientOshaEstablishmentSource(OshaEstablishmentSource):
             return parsed, fetched.final_url, fetched.status_code
 
         if response.status_code >= 500:
+            retry_note = (
+                f" after {attempts_used} attempts"
+                if response.status_code in TRANSIENT_SEARCH_STATUS_CODES and attempts_used > 1
+                else ""
+            )
             raise OshaFetchError(
-                f"OSHA search service returned HTTP {response.status_code}.",
+                f"OSHA search service returned HTTP {response.status_code}{retry_note}.",
                 status=SourceResultStatus.SOURCE_UNAVAILABLE,
                 http_status=response.status_code,
             )
