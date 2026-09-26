@@ -46,11 +46,11 @@ _CLOSED_12M_RE = re.compile(
 )
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]*)?\(?\d{3}\)?[\s.-]+\d{3}[\s.-]+\d{4}(?!\d)")
 _COMPLAINT_HEADING_RE = re.compile(
-    r"^#{1,6}\s+(?:Customer\s+)?Complaints\s*$",
+    r"^\s*#{1,6}\s+(?:Customer\s+)?Complaints\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _SUMMARY_HEADING_RE = re.compile(
-    r"^#{1,6}\s+Customer\s+Complaints\s+Summary\s*$",
+    r"^\s*#{1,6}\s+Customer\s+Complaints\s+Summary\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _SUMMARY_END_MARKERS = (
