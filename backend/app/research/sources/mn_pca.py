@@ -18,11 +18,14 @@ from .base import ContractorContext, ResearchSource
 LANDING_URL = "https://www.pca.state.mn.us/trending-topics/compliance-and-enforcement"
 DATA_VIEW_URL = "https://data.pca.state.mn.us/views/Enforcementactionswithpenalties/Complianceandenforcementnumberofcasesperyear"
 CSV_EXPORT_URL = DATA_VIEW_URL + ".csv?:showVizHome=no"
+WIMN_SITES_URL = "https://services.pca.state.mn.us/api/v1/wimn/sites"
+WIMN_ENFORCEMENT_URL = "https://services.pca.state.mn.us/api/v1/wimn/sites/enforcement-actions"
 TIMEOUT_SECONDS = 30.0
 USER_AGENT = "ParalegalResearchDatabaseV2/1.0 (+targeted official MPCA enforcement research)"
 FUZZY_REVIEW_THRESHOLD = 94.0
 TOKEN_SUBSET_REVIEW_THRESHOLD = 100.0
 TOKEN_SUBSET_MIN_TOKENS = 2
+WIMN_PAGE_SIZE = 100
 
 NAME_HEADERS = (
     "company or individual(s)",
@@ -128,13 +131,7 @@ def _party_segments(value: str) -> list[str]:
 
 
 def _should_review_name_variant(approved_name: str, candidate_name: str, wratio: float) -> bool:
-    """Keep plausible entity-name variants visible instead of emitting a false clean no-match.
-
-    WRatio catches typos and punctuation variation. token_set_ratio catches common legal-name
-    expansions such as "Acme Construction" vs "Acme Construction Services" where all tokens
-    of the shorter approved name are present in the longer source name. These are review-only;
-    they never become automatic confirmed matches.
-    """
+    """Keep plausible entity-name variants visible instead of emitting a false clean no-match."""
 
     if wratio >= FUZZY_REVIEW_THRESHOLD:
         return True
@@ -145,10 +142,23 @@ def _should_review_name_variant(approved_name: str, candidate_name: str, wratio:
     return fuzz.token_set_ratio(approved_name, candidate_name) >= TOKEN_SUBSET_REVIEW_THRESHOLD
 
 
+def _has_monetary_penalty(value: object) -> bool:
+    text = str(value or "").strip().casefold().replace(",", "")
+    if text in {"", "none", "null", "n/a", "na", "$0", "$0.00", "0", "0.00"}:
+        return False
+    numeric = re.sub(r"[^0-9.()-]", "", text).strip()
+    if not numeric:
+        return False
+    try:
+        return float(numeric.strip("()")) > 0
+    except ValueError:
+        return False
+
+
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.0.3"
+    adapter_version = "1.1.0"
     parser_version = "1.0.1"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
@@ -158,7 +168,13 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         self.prepare_error: tuple[SourceResultStatus, str, int | None] | None = None
 
     def health_check(self) -> dict:
-        return {"source_key": self.source_key, "implemented": True, "acquisition_mode": "official_tableau_csv_export", "url": CSV_EXPORT_URL}
+        return {
+            "source_key": self.source_key,
+            "implemented": True,
+            "acquisition_mode": "official_tableau_csv_export_with_wimn_rest_fallback",
+            "url": CSV_EXPORT_URL,
+            "fallback_url": WIMN_SITES_URL,
+        }
 
     def prepare(self) -> None:
         self.prepare_error = None
@@ -181,7 +197,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         content_type = response.headers.get("content-type", "").casefold()
         body = response.content
         if "html" in content_type or body.lstrip().lower().startswith(b"<!doctype html"):
-            if any(marker in body[:65536].lower() for marker in (b'radware captcha page', b'captcha.perfdrive.com', b'hcaptcha', b'g-recaptcha')):
+            if any(marker in body[:65536].lower() for marker in (b"radware captcha page", b"captcha.perfdrive.com", b"hcaptcha", b"g-recaptcha")):
                 self.prepare_error = (SourceResultStatus.BLOCKED, "MPCA export requires human verification (CAPTCHA); automated research is blocked.", response.status_code)
                 return
             self.prepare_error = (SourceResultStatus.PARSER_FAILURE, "MPCA export returned HTML instead of structured CSV; no negative result is allowed.", response.status_code)
@@ -192,12 +208,241 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         except (UnicodeError, csv.Error, MpcaDatasetError) as exc:
             self.prepare_error = (SourceResultStatus.DATASET_MALFORMED, str(exc), response.status_code)
 
+    def _fetch_wimn_records(
+        self,
+        url: str,
+        params: dict[str, object],
+    ) -> tuple[list[dict[str, object]], tuple[SourceResultStatus, str, int | None] | None]:
+        records: list[dict[str, object]] = []
+        offset = 0
+        expected_total: int | None = None
+
+        while True:
+            query = {**params, "format": "json", "limit": WIMN_PAGE_SIZE, "offset": offset}
+            try:
+                response = self.client.get(url, params=query)
+            except httpx.TimeoutException:
+                return [], (SourceResultStatus.TIMEOUT, "MPCA WIMN API request timed out.", None)
+            except httpx.HTTPError as exc:
+                return [], (SourceResultStatus.SOURCE_UNAVAILABLE, f"MPCA WIMN API request failed: {exc}", None)
+
+            if response.status_code in {401, 403}:
+                return [], (SourceResultStatus.BLOCKED, "MPCA WIMN API is not publicly accessible.", response.status_code)
+            if response.status_code >= 400:
+                return [], (SourceResultStatus.HTTP_ERROR, f"MPCA WIMN API returned HTTP {response.status_code}.", response.status_code)
+
+            try:
+                payload = response.json()
+            except ValueError:
+                return [], (SourceResultStatus.DATASET_MALFORMED, "MPCA WIMN API returned non-JSON data.", response.status_code)
+
+            page = payload.get("data")
+            if not isinstance(page, list):
+                return [], (SourceResultStatus.DATASET_MALFORMED, "MPCA WIMN API response is missing its data array.", response.status_code)
+            if any(not isinstance(item, dict) for item in page):
+                return [], (SourceResultStatus.DATASET_MALFORMED, "MPCA WIMN API returned an unexpected record shape.", response.status_code)
+
+            if expected_total is None:
+                try:
+                    expected_total = int(payload.get("recordCount", len(page)))
+                except (TypeError, ValueError):
+                    expected_total = len(page)
+
+            records.extend(page)
+            offset += len(page)
+            if not page or offset >= expected_total or len(page) < WIMN_PAGE_SIZE:
+                break
+
+        if expected_total is not None and len(records) < expected_total:
+            return [], (
+                SourceResultStatus.DATASET_MALFORMED,
+                f"MPCA WIMN API pagination was incomplete: expected {expected_total} records, received {len(records)}.",
+                200,
+            )
+
+        return records, None
+
+    def _search_wimn_fallback(self, contractor: ContractorContext, tableau_warning: str) -> SourceResult:
+        approved = _approved_names(contractor)
+        exact_sites: dict[str, tuple[dict[str, object], str, str, str]] = {}
+        ambiguous_sites: dict[str, tuple[dict[str, object], str, str, str, float]] = {}
+        site_query_count = 0
+
+        for name, basis in approved:
+            sites, error = self._fetch_wimn_records(WIMN_SITES_URL, {"searchString": name})
+            site_query_count += 1
+            if error:
+                status, warning, http_status = error
+                return self.validate_result(SourceResult(
+                    source_key=self.source_key,
+                    contractor_id=contractor.internal_id,
+                    status=status,
+                    completeness_status=CompletenessStatus.UNKNOWN,
+                    searched_name=contractor.contractor_name,
+                    searched_address=contractor.address_1,
+                    warnings=[tableau_warning, warning],
+                    source_url=WIMN_SITES_URL,
+                    http_status=http_status,
+                    acquisition_method="official_wimn_rest_fallback",
+                ))
+
+            name_norm = normalize_company_name(name)
+            for site in sites:
+                site_id = str(site.get("siteId") or "").strip()
+                if not site_id:
+                    continue
+                for field_name in ("ownerName", "siteName"):
+                    candidate = str(site.get(field_name) or "").strip()
+                    candidate_norm = normalize_company_name(candidate)
+                    if not candidate_norm:
+                        continue
+                    if candidate_norm == name_norm:
+                        exact_sites[site_id] = (site, name, basis, field_name)
+                        ambiguous_sites.pop(site_id, None)
+                        break
+                    score = fuzz.WRatio(name_norm, candidate_norm)
+                    if site_id not in exact_sites and _should_review_name_variant(name_norm, candidate_norm, score):
+                        previous = ambiguous_sites.get(site_id)
+                        if previous is None or score / 100.0 > previous[4]:
+                            ambiguous_sites[site_id] = (site, name, basis, field_name, score / 100.0)
+
+        evidence: list[EvidenceRecord] = []
+        action_count = 0
+
+        for site_id, (site, searched, basis, matched_field) in exact_sites.items():
+            actions, error = self._fetch_wimn_records(WIMN_ENFORCEMENT_URL, {"siteId": site_id})
+            if error:
+                status, warning, http_status = error
+                return self.validate_result(SourceResult(
+                    source_key=self.source_key,
+                    contractor_id=contractor.internal_id,
+                    status=status,
+                    completeness_status=CompletenessStatus.UNKNOWN,
+                    searched_name=contractor.contractor_name,
+                    searched_address=contractor.address_1,
+                    warnings=[tableau_warning, warning],
+                    source_url=WIMN_ENFORCEMENT_URL,
+                    http_status=http_status,
+                    acquisition_method="official_wimn_rest_fallback",
+                ))
+
+            for action in actions:
+                if not _has_monetary_penalty(action.get("netPenalty")):
+                    continue
+                action_count += 1
+                fingerprint = "|".join(
+                    normalize_text(str(action.get(key) or ""))
+                    for key in ("siteId", "activitySystemId", "enfActionDate", "enfCaseType", "netPenalty")
+                )
+                record_id = "mn-pca-wimn:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+                source_url = f"{WIMN_ENFORCEMENT_URL}?siteId={site_id}"
+                evidence.append(EvidenceRecord(
+                    field_name="environmental_violations",
+                    observed_value="Y",
+                    source_record_id=record_id,
+                    source_url=source_url,
+                    details={
+                        "classification": "confirmed_mpca_enforcement",
+                        "matched_search_name": searched,
+                        "query_basis": basis,
+                        "matched_site_field": matched_field,
+                        "site_id": site_id,
+                        "site_name": str(site.get("siteName") or ""),
+                        "owner_name": str(site.get("ownerName") or ""),
+                        "address": str(site.get("addressLine1") or ""),
+                        "city": str(site.get("cityName") or ""),
+                        "state": str(site.get("stateCode") or ""),
+                        "zip": str(site.get("zipCode") or ""),
+                        "activity_id": str(action.get("activityId") or ""),
+                        "activity_system_id": str(action.get("activitySystemId") or ""),
+                        "activity_type": str(action.get("activityTypeName") or ""),
+                        "program_name": str(action.get("programName") or ""),
+                        "case_type": str(action.get("enfCaseType") or ""),
+                        "enforcement_action_date": str(action.get("enfActionDate") or ""),
+                        "discovery_date": str(action.get("discoveryDate") or ""),
+                        "closure_date": str(action.get("closureDate") or ""),
+                        "penalty": str(action.get("netPenalty") or ""),
+                        "master_field_proposal_allowed": True,
+                    },
+                ))
+
+        warnings = [
+            tableau_warning,
+            "MPCA Tableau detail export no longer exposed the expected regulated-party schema; used the official MPCA WIMN REST API fallback.",
+        ]
+
+        if evidence:
+            status = SourceResultStatus.SUCCESS_WITH_FINDINGS
+            identity = IdentityStatus.CONFIRMED
+        elif exact_sites:
+            status = SourceResultStatus.SUCCESS_NO_MATCH
+            identity = IdentityStatus.CONFIRMED
+        elif ambiguous_sites:
+            status = SourceResultStatus.AMBIGUOUS_MATCH
+            identity = IdentityStatus.REVIEW_REQUIRED
+            site_id, first = next(iter(ambiguous_sites.items()))
+            site, searched, basis, matched_field, similarity = first
+            candidate = str(site.get(matched_field) or "")
+            evidence.append(EvidenceRecord(
+                field_name="environmental_violations",
+                observed_value=None,
+                source_record_id=f"mn-pca-wimn-site:{site_id}",
+                source_url=f"{WIMN_SITES_URL}?siteId={site_id}",
+                details={
+                    "classification": "possible_mpca_identity",
+                    "matched_search_name": searched,
+                    "query_basis": basis,
+                    "candidate_party": candidate,
+                    "matched_site_field": matched_field,
+                    "name_similarity": similarity,
+                    "site_id": site_id,
+                    "site_name": str(site.get("siteName") or ""),
+                    "owner_name": str(site.get("ownerName") or ""),
+                    "master_field_proposal_allowed": False,
+                },
+            ))
+            warnings.append("MPCA WIMN returned a similar site/owner name, but identity was not exact enough for an automatic environmental_violations proposal.")
+        else:
+            status = SourceResultStatus.SUCCESS_NO_MATCH
+            identity = IdentityStatus.NOT_EVALUATED
+
+        return self.validate_result(SourceResult(
+            source_key=self.source_key,
+            contractor_id=contractor.internal_id,
+            status=status,
+            identity_status=identity,
+            completeness_status=CompletenessStatus.COMPLETE,
+            identity_confidence=1.0 if exact_sites else None,
+            searched_name=contractor.contractor_name,
+            searched_address=contractor.address_1,
+            evidence=evidence,
+            warnings=warnings,
+            normalized_payload={
+                "classification": "MATCH" if evidence and status == SourceResultStatus.SUCCESS_WITH_FINDINGS else (
+                    "AMBIGUOUS" if status == SourceResultStatus.AMBIGUOUS_MATCH else "NO_MATCH"
+                ),
+                "approved_names_searched": [{"name": n, "basis": b} for n, b in approved],
+                "site_query_count": site_query_count,
+                "confirmed_site_count": len(exact_sites),
+                "ambiguous_site_count": len(ambiguous_sites),
+                "penalized_enforcement_action_count": action_count,
+                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                "tableau_fallback_reason": tableau_warning,
+                "negative_semantics": "A clean no-match is research evidence only; it never proposes environmental_violations=N.",
+            },
+            source_record_id=evidence[0].source_record_id if evidence and status == SourceResultStatus.SUCCESS_WITH_FINDINGS else None,
+            source_url=WIMN_SITES_URL,
+            acquisition_method="official_wimn_rest_fallback",
+        ))
+
     def search(self, contractor: ContractorContext) -> SourceResult:
         if self.records is None and self.prepare_error is None:
             self.prepare()
 
         if self.prepare_error:
             status, warning, http_status = self.prepare_error
+            if status == SourceResultStatus.DATASET_MALFORMED:
+                return self._search_wimn_fallback(contractor, warning)
             return self.validate_result(SourceResult(
                 source_key=self.source_key, contractor_id=contractor.internal_id, status=status,
                 completeness_status=CompletenessStatus.UNKNOWN, searched_name=contractor.contractor_name,
