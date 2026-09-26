@@ -20,7 +20,7 @@ from app.research.sources.bbb_resilient import (
     ResilientBbbBusinessProfileSource,
     parse_search_profile_urls,
 )
-from app.research.sources.osha_operational import OperationalOshaEstablishmentSource
+from app.research.sources.osha_indexed import IndexedOshaEstablishmentSource
 from app.research.sources.osha_resilient import ResilientOshaEstablishmentSource
 from app.research.sources.public_browser import BrowserFetchResult
 
@@ -112,7 +112,7 @@ class FakeBrowserSession:
 
 
 def test_source_registry_uses_resilient_public_site_adapters():
-    assert SOURCE_ADAPTERS["osha"] is OperationalOshaEstablishmentSource
+    assert SOURCE_ADAPTERS["osha"] is IndexedOshaEstablishmentSource
     assert SOURCE_ADAPTERS["bbb"] is ResilientBbbBusinessProfileSource
 
 
