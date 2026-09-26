@@ -158,11 +158,12 @@ def _has_monetary_penalty(value: object) -> bool:
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.1.1"
+    adapter_version = "1.2.0"
     parser_version = "1.0.1"
 
-    def __init__(self, *, client: httpx.Client | None = None) -> None:
+    def __init__(self, *, client: httpx.Client | None = None, use_tableau_legacy: bool = False) -> None:
         self.client = client or httpx.Client(timeout=TIMEOUT_SECONDS, follow_redirects=True, headers={"User-Agent": USER_AGENT})
+        self.use_tableau_legacy = use_tableau_legacy
         self.records: list[MpcaRecord] | None = None
         self.dataset_sha256: str | None = None
         self.prepare_error: tuple[SourceResultStatus, str, int | None] | None = None
@@ -171,9 +172,10 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         return {
             "source_key": self.source_key,
             "implemented": True,
-            "acquisition_mode": "official_tableau_csv_export_with_wimn_rest_fallback",
-            "url": CSV_EXPORT_URL,
-            "fallback_url": WIMN_SITES_URL,
+            "acquisition_mode": "official_wimn_rest_api_primary",
+            "url": WIMN_SITES_URL,
+            "enforcement_url": WIMN_ENFORCEMENT_URL,
+            "legacy_tableau_url": CSV_EXPORT_URL,
         }
 
     def prepare(self) -> None:
@@ -262,7 +264,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
 
         return records, None
 
-    def _search_wimn_fallback(self, contractor: ContractorContext, tableau_warning: str) -> SourceResult:
+    def _search_wimn(self, contractor: ContractorContext, context_note: str = "") -> SourceResult:
         approved = _approved_names(contractor)
         exact_sites: dict[str, tuple[dict[str, object], str, str, str]] = {}
         ambiguous_sites: dict[str, tuple[dict[str, object], str, str, str, float]] = {}
@@ -273,6 +275,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             site_query_count += 1
             if error:
                 status, warning, http_status = error
+                warnings = [warning]
+                if context_note:
+                    warnings.insert(0, context_note)
                 return self.validate_result(SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
@@ -280,10 +285,10 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     completeness_status=CompletenessStatus.UNKNOWN,
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
-                    warnings=[tableau_warning, warning],
+                    warnings=warnings,
                     source_url=WIMN_SITES_URL,
                     http_status=http_status,
-                    acquisition_method="official_wimn_rest_fallback",
+                    acquisition_method="official_wimn_rest_api",
                 ))
 
             name_norm = normalize_company_name(name)
@@ -313,6 +318,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             actions, error = self._fetch_wimn_records(WIMN_ENFORCEMENT_URL, {"siteId": site_id})
             if error:
                 status, warning, http_status = error
+                warnings = [warning]
+                if context_note:
+                    warnings.insert(0, context_note)
                 return self.validate_result(SourceResult(
                     source_key=self.source_key,
                     contractor_id=contractor.internal_id,
@@ -320,10 +328,10 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     completeness_status=CompletenessStatus.UNKNOWN,
                     searched_name=contractor.contractor_name,
                     searched_address=contractor.address_1,
-                    warnings=[tableau_warning, warning],
+                    warnings=warnings,
                     source_url=WIMN_ENFORCEMENT_URL,
                     http_status=http_status,
-                    acquisition_method="official_wimn_rest_fallback",
+                    acquisition_method="official_wimn_rest_api",
                 ))
 
             for action in actions:
@@ -366,10 +374,9 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     },
                 ))
 
-        warnings = [
-            tableau_warning,
-            "MPCA Tableau detail export was unavailable or unusable; used the official MPCA WIMN REST API fallback.",
-        ]
+        warnings: list[str] = []
+        if context_note:
+            warnings.append(context_note)
 
         if evidence:
             status = SourceResultStatus.SUCCESS_WITH_FINDINGS
@@ -406,6 +413,21 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             status = SourceResultStatus.SUCCESS_NO_MATCH
             identity = IdentityStatus.NOT_EVALUATED
 
+        normalized_payload = {
+            "classification": "MATCH" if evidence and status == SourceResultStatus.SUCCESS_WITH_FINDINGS else (
+                "AMBIGUOUS" if status == SourceResultStatus.AMBIGUOUS_MATCH else "NO_MATCH"
+            ),
+            "approved_names_searched": [{"name": n, "basis": b} for n, b in approved],
+            "site_query_count": site_query_count,
+            "confirmed_site_count": len(exact_sites),
+            "ambiguous_site_count": len(ambiguous_sites),
+            "penalized_enforcement_action_count": action_count,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "negative_semantics": "A clean no-match is research evidence only; it never proposes environmental_violations=N.",
+        }
+        if context_note:
+            normalized_payload["legacy_tableau_context"] = context_note
+
         return self.validate_result(SourceResult(
             source_key=self.source_key,
             contractor_id=contractor.internal_id,
@@ -417,25 +439,16 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             searched_address=contractor.address_1,
             evidence=evidence,
             warnings=warnings,
-            normalized_payload={
-                "classification": "MATCH" if evidence and status == SourceResultStatus.SUCCESS_WITH_FINDINGS else (
-                    "AMBIGUOUS" if status == SourceResultStatus.AMBIGUOUS_MATCH else "NO_MATCH"
-                ),
-                "approved_names_searched": [{"name": n, "basis": b} for n, b in approved],
-                "site_query_count": site_query_count,
-                "confirmed_site_count": len(exact_sites),
-                "ambiguous_site_count": len(ambiguous_sites),
-                "penalized_enforcement_action_count": action_count,
-                "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                "tableau_fallback_reason": tableau_warning,
-                "negative_semantics": "A clean no-match is research evidence only; it never proposes environmental_violations=N.",
-            },
+            normalized_payload=normalized_payload,
             source_record_id=evidence[0].source_record_id if evidence and status == SourceResultStatus.SUCCESS_WITH_FINDINGS else None,
             source_url=WIMN_SITES_URL,
-            acquisition_method="official_wimn_rest_fallback",
+            acquisition_method="official_wimn_rest_api",
         ))
 
     def search(self, contractor: ContractorContext) -> SourceResult:
+        if not self.use_tableau_legacy:
+            return self._search_wimn(contractor)
+
         if self.records is None and self.prepare_error is None:
             self.prepare()
 
@@ -444,7 +457,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             if status == SourceResultStatus.DATASET_MALFORMED or (
                 status == SourceResultStatus.BLOCKED and "CAPTCHA" in warning.upper()
             ):
-                return self._search_wimn_fallback(contractor, warning)
+                return self._search_wimn(contractor, warning)
             return self.validate_result(SourceResult(
                 source_key=self.source_key, contractor_id=contractor.internal_id, status=status,
                 completeness_status=CompletenessStatus.UNKNOWN, searched_name=contractor.contractor_name,
