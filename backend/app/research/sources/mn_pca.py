@@ -17,6 +17,12 @@ from rapidfuzz import fuzz
 from ..matching import normalize_company_name, normalize_text
 from ..models import CompletenessStatus, EvidenceRecord, IdentityStatus, SourceResult, SourceResultStatus
 from .base import ContractorContext, ResearchSource
+from .mn_pca_reports import (
+    KNOWN_REPORT_URLS,
+    MIN_TOTAL_REPORT_RECORDS,
+    MpcaReportError,
+    fetch_official_report_dataset,
+)
 from .public_browser import (
     BrowserBlockedError,
     BrowserFetchError,
@@ -145,14 +151,14 @@ def parse_mpca_csv(content: bytes | str) -> tuple[list[MpcaRecord], str]:
         record_id = "mn-pca:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
         records.append(
             MpcaRecord(
-                record_id,
-                party,
-                public_date,
-                location,
-                violation,
-                penalty,
-                case_type,
-                {str(k): str(v or "") for k, v in row.items() if k},
+                record_id=record_id,
+                party=party,
+                public_date=public_date,
+                location=location,
+                violation=violation,
+                penalty=penalty,
+                case_type=case_type,
+                raw={str(k): str(v or "") for k, v in row.items() if k},
             )
         )
 
@@ -213,18 +219,27 @@ def _looks_like_challenge(content: bytes | str) -> bool:
 
 
 def _html_like(content_type: str, content: bytes) -> bool:
+    lowered = content.lstrip().lower()
     return (
         "html" in (content_type or "").casefold()
-        or content.lstrip().lower().startswith(b"<!doctype html")
-        or content.lstrip().lower().startswith(b"<html")
+        or lowered.startswith(b"<!doctype html")
+        or lowered.startswith(b"<html")
     )
+
+
+def _merge_records(*groups: list[MpcaRecord]) -> list[MpcaRecord]:
+    merged: dict[str, MpcaRecord] = {}
+    for group in groups:
+        for record in group:
+            merged.setdefault(record.record_id, record)
+    return list(merged.values())
 
 
 class MinnesotaPcaEnforcementSource(ResearchSource):
     source_key = "mn_pca"
     display_name = "Minnesota PCA Enforcement Actions"
-    adapter_version = "1.3.0"
-    parser_version = "1.0.1"
+    adapter_version = "1.4.0"
+    parser_version = "1.0.2"
 
     def __init__(
         self,
@@ -237,6 +252,10 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         min_expected_records: int = MIN_PRODUCTION_RECORDS,
         allow_browser_fallback: bool = True,
         allow_cached_fallback: bool = True,
+        allow_report_fallback: bool = True,
+        report_urls: tuple[str, ...] | None = None,
+        discover_report_urls: bool = True,
+        report_min_records: int = MIN_TOTAL_REPORT_RECORDS,
     ) -> None:
         self.client = client or httpx.Client(
             timeout=TIMEOUT_SECONDS,
@@ -250,27 +269,42 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         self._min_expected_records = max(1, int(min_expected_records))
         self._allow_browser_fallback = bool(allow_browser_fallback)
         self._allow_cached_fallback = bool(allow_cached_fallback)
+        self._allow_report_fallback = bool(allow_report_fallback)
+        self._report_urls = report_urls
+        self._discover_report_urls = bool(discover_report_urls)
+        self._report_min_records = max(1, int(report_min_records))
 
         self.records: list[MpcaRecord] | None = None
         self.dataset_sha256: str | None = None
         self.prepare_error: tuple[SourceResultStatus, str, int | None] | None = None
         self.acquisition_method: str | None = None
         self.dataset_is_cached = False
+        self.dataset_is_partial_scope = False
         self.cache_age_seconds: float | None = None
         self.acquisition_warnings: list[str] = []
+        self.report_scope_start: str | None = None
+        self.report_scope_end: str | None = None
+        self.report_page_count = 0
+        self.report_source_urls: tuple[str, ...] = ()
 
     def health_check(self) -> dict:
         return {
             "source_key": self.source_key,
             "implemented": True,
-            "acquisition_mode": "official_tableau_full_extract_direct_then_local_browser",
+            "acquisition_mode": "official_tableau_then_official_mpca_report_pages",
             "url": CSV_EXPORT_URL,
             "browser_fallback": "system_edge_or_chrome_with_persistent_profile",
+            "official_report_fallback": True,
             "validated_cache_fallback": True,
             "rest_api_used": False,
         }
 
-    def _validate_dataset(self, content: bytes | str, *, origin: str) -> tuple[list[MpcaRecord], str, bytes]:
+    def _validate_dataset(
+        self,
+        content: bytes | str,
+        *,
+        origin: str,
+    ) -> tuple[list[MpcaRecord], str, bytes]:
         raw = content if isinstance(content, bytes) else content.encode("utf-8")
         if _looks_like_challenge(raw):
             raise MpcaAcquisitionError(
@@ -286,7 +320,6 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                 status=SourceResultStatus.DATASET_MALFORMED,
                 http_status=200,
             ) from exc
-
         if len(records) < self._min_expected_records:
             raise MpcaAcquisitionError(
                 f"MPCA {origin} returned only {len(records)} validated detail rows; "
@@ -329,17 +362,16 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         try:
             landing = self.client.get(LANDING_URL, headers=headers)
             self._response_bytes(landing, label="landing page")
-
-            view_headers = {**headers, "Referer": LANDING_URL}
-            view = self.client.get(DATA_VIEW_URL, headers=view_headers)
+            view = self.client.get(DATA_VIEW_URL, headers={**headers, "Referer": LANDING_URL})
             self._response_bytes(view, label="Tableau view")
-
-            export_headers = {
-                **headers,
-                "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
-                "Referer": DATA_VIEW_URL,
-            }
-            export = self.client.get(CSV_EXPORT_URL, headers=export_headers)
+            export = self.client.get(
+                CSV_EXPORT_URL,
+                headers={
+                    **headers,
+                    "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
+                    "Referer": DATA_VIEW_URL,
+                },
+            )
             body = self._response_bytes(export, label="CSV export")
         except httpx.TimeoutException as exc:
             raise MpcaAcquisitionError(
@@ -351,7 +383,6 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                 f"MPCA direct Tableau acquisition failed: {exc}",
                 status=SourceResultStatus.SOURCE_UNAVAILABLE,
             ) from exc
-
         return self._validate_dataset(body, origin="direct Tableau export")
 
     def _browser_tableau_export(
@@ -405,7 +436,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             temp_path.write_bytes(raw)
             temp_path.replace(self._cache_path)
         except OSError:
-            return
+            pass
 
     def _read_recent_cache(self) -> tuple[list[MpcaRecord], str, bytes, float] | None:
         try:
@@ -414,13 +445,32 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
             if age > self._cache_max_age_seconds:
                 return None
             raw = self._cache_path.read_bytes()
-            records, digest, validated_raw = self._validate_dataset(
-                raw,
-                origin="validated local cache",
-            )
+            records, digest, validated_raw = self._validate_dataset(raw, origin="validated local cache")
             return records, digest, validated_raw, age
         except (OSError, MpcaAcquisitionError):
             return None
+
+    def _official_report_fallback(self) -> tuple[list[MpcaRecord], str]:
+        try:
+            dataset = fetch_official_report_dataset(
+                self.client,
+                report_urls=self._report_urls,
+                discover=self._discover_report_urls,
+                min_total_records=self._report_min_records,
+            )
+            records, digest = parse_mpca_csv(dataset.csv_bytes)
+        except (httpx.HTTPError, MpcaReportError, UnicodeError, csv.Error, MpcaDatasetError) as exc:
+            raise MpcaAcquisitionError(
+                f"Official MPCA report-page fallback failed: {exc}",
+                status=SourceResultStatus.SOURCE_UNAVAILABLE,
+            ) from exc
+
+        self.report_scope_start = dataset.scope_start
+        self.report_scope_end = dataset.scope_end
+        self.report_page_count = dataset.page_count
+        self.report_source_urls = dataset.source_urls
+        self.acquisition_warnings.extend(dataset.warnings)
+        return records, digest
 
     @staticmethod
     def _pick_failure(errors: list[MpcaAcquisitionError]) -> MpcaAcquisitionError:
@@ -444,7 +494,6 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
         live_attempts: list[tuple[str, Callable[[], tuple[list[MpcaRecord], str, bytes]]]] = [
             ("official_tableau_direct_csv", self._direct_tableau_export),
         ]
-
         if self._allow_browser_fallback:
             live_attempts.extend(
                 [
@@ -474,31 +523,67 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                 self.dataset_sha256 = digest
                 self.acquisition_method = method
                 self.dataset_is_cached = False
+                self.dataset_is_partial_scope = False
                 self.cache_age_seconds = None
                 if errors:
                     self.acquisition_warnings = [
-                        f"Earlier MPCA acquisition attempt failed closed: {exc}"
-                        for exc in errors
+                        f"Earlier MPCA acquisition attempt failed closed: {exc}" for exc in errors
                     ]
                 self._write_cache(raw)
                 return
             except MpcaAcquisitionError as exc:
                 errors.append(exc)
 
-        if self._allow_cached_fallback:
-            cached = self._read_recent_cache()
+        report_records: list[MpcaRecord] | None = None
+        report_digest: str | None = None
+        if self._allow_report_fallback:
+            try:
+                report_records, report_digest = self._official_report_fallback()
+            except MpcaAcquisitionError as exc:
+                errors.append(exc)
+
+        cached = self._read_recent_cache() if self._allow_cached_fallback else None
+
+        if report_records is not None:
             if cached is not None:
-                records, digest, _raw, age = cached
-                self.records = records
-                self.dataset_sha256 = digest
-                self.acquisition_method = "validated_recent_tableau_cache"
+                cache_records, _cache_digest, _raw, age = cached
+                self.records = _merge_records(report_records, cache_records)
+                self.dataset_sha256 = hashlib.sha256(
+                    "|".join(sorted(record.record_id for record in self.records)).encode("utf-8")
+                ).hexdigest()
+                self.acquisition_method = "official_mpca_reports_plus_recent_tableau_cache"
                 self.dataset_is_cached = True
                 self.cache_age_seconds = age
-                self.acquisition_warnings = [
-                    "Live MPCA Tableau acquisition failed; using a recent previously validated full Tableau extract. "
-                    "Cached results are partial evidence only and cannot create a clean negative."
-                ] + [f"Live acquisition failure: {exc}" for exc in errors]
-                return
+                self.acquisition_warnings.append(
+                    "A recent validated Tableau cache was merged with fresh official MPCA report pages to broaden historical coverage. "
+                    "Because the live complete Tableau extract could not be refreshed, no-match results remain partial."
+                )
+            else:
+                self.records = report_records
+                self.dataset_sha256 = report_digest
+                self.acquisition_method = "official_mpca_enforcement_report_pages"
+                self.dataset_is_cached = False
+                self.cache_age_seconds = None
+            self.dataset_is_partial_scope = True
+            self.acquisition_warnings.extend(
+                f"Tableau acquisition failed closed before report fallback: {exc}" for exc in errors
+                if "report-page fallback" not in str(exc).casefold()
+            )
+            return
+
+        if cached is not None:
+            records, digest, _raw, age = cached
+            self.records = records
+            self.dataset_sha256 = digest
+            self.acquisition_method = "validated_recent_tableau_cache"
+            self.dataset_is_cached = True
+            self.dataset_is_partial_scope = True
+            self.cache_age_seconds = age
+            self.acquisition_warnings = [
+                "Live MPCA acquisition failed; using a recent previously validated full Tableau extract. "
+                "Cached results are partial evidence only and cannot create a clean negative."
+            ] + [f"Live acquisition failure: {exc}" for exc in errors]
+            return
 
         failure = self._pick_failure(errors)
         details = " | ".join(str(exc) for exc in errors)
@@ -528,7 +613,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     },
                     source_url=DATA_VIEW_URL,
                     http_status=http_status,
-                    acquisition_method="official_tableau_acquisition_failed",
+                    acquisition_method="official_mpca_acquisition_failed",
                 )
             )
 
@@ -561,6 +646,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
 
         evidence: list[EvidenceRecord] = []
         for record, searched, basis, segment in exact:
+            record_url = record.raw.get("Source URL") or DATA_VIEW_URL
             summary = " | ".join(
                 x for x in (record.public_date, record.violation, record.penalty) if x
             )
@@ -569,7 +655,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     field_name="environmental_violations",
                     observed_value="Y",
                     source_record_id=record.record_id,
-                    source_url=DATA_VIEW_URL,
+                    source_url=record_url,
                     details={
                         "classification": "confirmed_mpca_enforcement",
                         "matched_party": segment,
@@ -584,10 +670,13 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                         "summary": summary,
                         "dataset_sha256": self.dataset_sha256,
                         "dataset_cached": self.dataset_is_cached,
+                        "dataset_partial_scope": self.dataset_is_partial_scope,
                         "master_field_proposal_allowed": True,
                     },
                 )
             )
+
+        partial_dataset = self.dataset_is_cached or self.dataset_is_partial_scope
 
         if exact:
             status = SourceResultStatus.SUCCESS_WITH_FINDINGS
@@ -601,7 +690,7 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     field_name="environmental_violations",
                     observed_value=None,
                     source_record_id=first[0].record_id,
-                    source_url=DATA_VIEW_URL,
+                    source_url=first[0].raw.get("Source URL") or DATA_VIEW_URL,
                     details={
                         "classification": "possible_mpca_identity",
                         "candidate_count": len(ambiguous),
@@ -610,34 +699,30 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                         "name_similarity": first[4],
                         "dataset_sha256": self.dataset_sha256,
                         "dataset_cached": self.dataset_is_cached,
+                        "dataset_partial_scope": self.dataset_is_partial_scope,
                         "master_field_proposal_allowed": False,
                     },
                 )
             )
-        elif self.dataset_is_cached:
+        elif partial_dataset:
             status = SourceResultStatus.PARTIAL_RESULTS
             identity = IdentityStatus.NOT_EVALUATED
         else:
             status = SourceResultStatus.SUCCESS_NO_MATCH
             identity = IdentityStatus.NOT_EVALUATED
 
-        completeness = (
-            CompletenessStatus.PARTIAL
-            if self.dataset_is_cached
-            else CompletenessStatus.COMPLETE
-        )
+        completeness = CompletenessStatus.PARTIAL if partial_dataset else CompletenessStatus.COMPLETE
         warnings = list(self.acquisition_warnings)
         if ambiguous and not exact:
             warnings.append(
-                "MPCA returned similar regulated-party names, but identity was not exact enough "
-                "for an automatic environmental_violations proposal."
+                "MPCA returned similar regulated-party names, but identity was not exact enough for an automatic environmental_violations proposal."
             )
-        if self.dataset_is_cached and not exact:
+        if partial_dataset and not exact:
             warnings.append(
-                "No bidder match was found in the recent cached MPCA extract, but live MPCA data "
-                "could not be refreshed; this is not a clean negative."
+                "No bidder match was found in the available MPCA evidence, but the live all-history Tableau extract was unavailable; this is not a clean negative."
             )
 
+        source_url = self.report_source_urls[0] if self.report_source_urls else DATA_VIEW_URL
         return self.validate_result(
             SourceResult(
                 source_key=self.source_key,
@@ -654,11 +739,11 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     "classification": (
                         "MATCH"
                         if exact
-                        else (
-                            "AMBIGUOUS"
-                            if ambiguous
-                            else ("PARTIAL_NO_MATCH" if self.dataset_is_cached else "NO_MATCH")
-                        )
+                        else "AMBIGUOUS"
+                        if ambiguous
+                        else "PARTIAL_NO_MATCH"
+                        if partial_dataset
+                        else "NO_MATCH"
                     ),
                     "approved_names_searched": [
                         {"name": name, "basis": basis} for name, basis in approved
@@ -668,17 +753,20 @@ class MinnesotaPcaEnforcementSource(ResearchSource):
                     "dataset_record_count": len(self.records or []),
                     "dataset_sha256": self.dataset_sha256,
                     "dataset_cached": self.dataset_is_cached,
+                    "dataset_partial_scope": self.dataset_is_partial_scope,
                     "cache_age_seconds": self.cache_age_seconds,
+                    "report_page_count": self.report_page_count,
+                    "report_scope_start": self.report_scope_start,
+                    "report_scope_end": self.report_scope_end,
                     "retrieved_at": datetime.now(timezone.utc).isoformat(),
                     "rest_api_used": False,
                     "negative_semantics": (
-                        "A live, validated complete Tableau extract can support SUCCESS_NO_MATCH, "
-                        "but no-match evidence never proposes environmental_violations=N. "
-                        "Cached or failed acquisition can never create a clean negative."
+                        "Only a live validated complete Tableau extract can support SUCCESS_NO_MATCH. "
+                        "Official report pages and cached data can support findings and review candidates, but no-match results remain PARTIAL_RESULTS and never propose environmental_violations=N."
                     ),
                 },
                 source_record_id=exact[0][0].record_id if exact else None,
-                source_url=DATA_VIEW_URL,
+                source_url=source_url,
                 acquisition_method=self.acquisition_method,
             )
         )
