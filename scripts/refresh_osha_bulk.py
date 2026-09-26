@@ -9,9 +9,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.research.sources.osha_bulk import (  # noqa: E402
-    DOL_OSHA_BULK_URL,
-    refresh_official_bulk_index,
+from app.research.sources.osha_bulk import DOL_OSHA_BULK_URL  # noqa: E402
+from app.research.sources.osha_operational import (  # noqa: E402
+    default_operational_cache_dir,
+    inspect_operational_snapshot,
+    refresh_operational_osha_index,
 )
 
 
@@ -19,8 +21,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Refresh the local OSHA inspection index from the official U.S. Department "
-            "of Labor complete-dataset download. The initial download is large; bidder "
-            "research is local and fast after the index is built."
+            "of Labor complete-dataset download. The download/index is staged and only "
+            "promoted after validation succeeds."
         )
     )
     parser.add_argument(
@@ -33,31 +35,53 @@ def main() -> int:
         action="store_true",
         help=(
             "Reuse the cached OSHA ZIP instead of downloading a current snapshot. "
-            "Use only for rebuilding/debugging; a normal refresh downloads the official file again."
+            "This rebuilds the index but preserves the archive's original freshness timestamp."
         ),
+    )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Explicitly download a current official OSHA snapshot (normal refresh behavior).",
     )
     parser.add_argument(
         "--delete-archive",
         action="store_true",
         help="Delete the downloaded ZIP after the SQLite index has been built successfully.",
     )
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        help="Print the current OSHA snapshot/index status without changing anything.",
+    )
     args = parser.parse_args()
 
     if args.source_archive is not None and not args.source_archive.exists():
         parser.error(f"Source archive does not exist: {args.source_archive}")
+    if args.source_archive is not None and args.reuse_cached_archive:
+        parser.error("--source-archive and --reuse-cached-archive cannot be combined")
+
+    cache_dir = default_operational_cache_dir()
+    if args.status_only:
+        print(json.dumps(inspect_operational_snapshot(cache_dir), indent=2, sort_keys=True))
+        return 0
 
     print(f"OSHA official bulk source: {DOL_OSHA_BULK_URL}")
+    print(f"Operational OSHA cache: {cache_dir}")
     if args.source_archive is None:
         if args.reuse_cached_archive:
-            print("Reusing the cached official OSHA ZIP and rebuilding the local index...")
+            print("Rebuilding from the cached OSHA ZIP without changing its freshness date...")
         else:
-            print("Downloading the current official complete dataset and rebuilding the local index...")
+            print("Downloading a current official complete dataset, validating it, and rebuilding the local index...")
     else:
         print(f"Building the local index from: {args.source_archive}")
 
-    metadata = refresh_official_bulk_index(
+    metadata = refresh_operational_osha_index(
+        cache_dir=cache_dir,
         source_archive=args.source_archive,
-        force_download=args.source_archive is None and not args.reuse_cached_archive,
+        force_download=(
+            args.source_archive is None
+            and (args.force_download or not args.reuse_cached_archive)
+        ),
         keep_archive=not args.delete_archive,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
