@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import io
+
 import httpx
 import pytest
 
@@ -14,7 +17,7 @@ from app.research.models import (
 )
 from app.research.service import list_tasks, persist_source_result
 from app.research.sources.base import ContractorContext, ResearchSource
-from app.research.sources.mn_pca import CSV_EXPORT_URL, MinnesotaPcaEnforcementSource
+from app.research.sources.mn_pca import MinnesotaPcaEnforcementSource
 from app.sources import SOURCES
 
 
@@ -47,12 +50,16 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def _mpca_source(body: str) -> MinnesotaPcaEnforcementSource:
+    candidate = next(csv.DictReader(io.StringIO(body)))["Company or individual(s)"]
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == CSV_EXPORT_URL
+        assert request.url.path == "/api/v1/wimn/sites"
         return httpx.Response(
             200,
-            text=body,
-            headers={"content-type": "text/csv"},
+            json={
+                "data": [{"siteId": "fixture-1", "siteName": candidate, "ownerName": candidate}],
+                "recordCount": 1,
+            },
             request=request,
         )
 
