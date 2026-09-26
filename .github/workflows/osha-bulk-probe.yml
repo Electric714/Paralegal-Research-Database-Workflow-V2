@@ -1,0 +1,27 @@
+name: OSHA Bulk Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/osha-bulk-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe official OSHA bulk transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://data.dol.gov/data-catalog/OSHA/inspection/OSHA_inspection.zip'
+          echo '=== HEAD ==='
+          curl -sSIL --max-time 30 "$URL" | sed -n '1,80p'
+          echo '=== RANGE 0-0 ==='
+          curl -sS -D - --range 0-0 --max-time 30 -o /tmp/osha-first-byte.bin "$URL" | sed -n '1,80p'
+          echo "range_body_bytes=$(wc -c < /tmp/osha-first-byte.bin)"
