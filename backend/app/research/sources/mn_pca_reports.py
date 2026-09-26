@@ -3,8 +3,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import os
 import re
+import time
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -12,6 +15,7 @@ import httpx
 
 
 SEARCH_URL = "https://www.pca.state.mn.us/search?search=enforcement%20cases%20at%20MPCA"
+JINA_READER_BASE = "https://r.jina.ai/"
 KNOWN_REPORT_URLS = (
     "https://www.pca.state.mn.us/news-and-stories/mpca-completes-118-enforcement-cases-in-second-half-of-2023",
     "https://www.pca.state.mn.us/news-and-stories/mpca-completes-100-enforcement-cases-in-first-half-of-2024",
@@ -22,7 +26,8 @@ KNOWN_REPORT_URLS = (
 )
 
 MIN_TOTAL_REPORT_RECORDS = 250
-MIN_PAGE_COVERAGE_RATIO = 0.70
+MIN_REPORT_ROWS_PER_PAGE = 5
+READER_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
 class MpcaReportError(RuntimeError):
@@ -57,8 +62,22 @@ class _ReportHtmlParser(HTMLParser):
         self._li_parts: list[str] = []
         self._current_href: str | None = None
         self._anchor_parts: list[str] = []
+        self._ignored_depth = 0
+
+    @staticmethod
+    def _is_tablesaw_label(attrs: list[tuple[str, str | None]]) -> bool:
+        attr_map = {key.casefold(): (value or "") for key, value in attrs}
+        classes = attr_map.get("class", "").casefold().split()
+        return "tablesaw-cell-label" in classes or attr_map.get("aria-hidden", "").casefold() == "true"
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._ignored_depth:
+            self._ignored_depth += 1
+            return
+        if self._is_tablesaw_label(attrs):
+            self._ignored_depth = 1
+            return
+
         lower = tag.casefold()
         if lower == "table":
             self._table_depth += 1
@@ -81,6 +100,10 @@ class _ReportHtmlParser(HTMLParser):
                     break
 
     def handle_endtag(self, tag: str) -> None:
+        if self._ignored_depth:
+            self._ignored_depth -= 1
+            return
+
         lower = tag.casefold()
         if lower in {"td", "th"} and self._current_cell is not None and self._current_row is not None:
             self._current_row.append(" ".join(self._current_cell).strip())
@@ -109,6 +132,8 @@ class _ReportHtmlParser(HTMLParser):
             self._anchor_parts = []
 
     def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
         value = " ".join(data.split())
         if not value:
             return
@@ -127,6 +152,15 @@ class _ReportHtmlParser(HTMLParser):
 
 def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").casefold()).strip()
+
+
+def _plain_markdown(value: str) -> str:
+    text = unescape(value or "")
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^\s)]+(?:\s+\"[^\"]*\")?\)", r"\1", text)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = text.replace("\\|", "|")
+    return " ".join(text.split()).strip()
 
 
 def _fingerprint(row: dict[str, str]) -> str:
@@ -159,6 +193,24 @@ def discover_report_urls(html: str, *, base_url: str = SEARCH_URL) -> list[str]:
             continue
         if absolute not in urls:
             urls.append(absolute)
+    return urls
+
+
+def discover_report_urls_markdown(markdown: str) -> list[str]:
+    urls: list[str] = []
+    pattern = re.compile(
+        r"\[(?P<label>[^\]\n]+)\]\((?P<url>https://www\.pca\.state\.mn\.us/news-and-stories/[^)\s]+)\)",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(markdown or ""):
+        label_norm = _norm(match.group("label"))
+        if "enforcement cases" not in label_norm:
+            continue
+        if not re.search(r"\b(?:first|second) half of 20\d{2}\b", label_norm):
+            continue
+        url = match.group("url").rstrip("/")
+        if url not in urls:
+            urls.append(url)
     return urls
 
 
@@ -228,14 +280,18 @@ def _table_records(parser: _ReportHtmlParser, source_url: str) -> list[dict[str,
 
 
 def _list_records(parser: _ReportHtmlParser, source_url: str) -> list[dict[str, str]]:
+    return _bullet_records(parser.list_items, source_url)
+
+
+def _bullet_records(items: list[str], source_url: str) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     pattern = re.compile(
         r"^(?P<party>.+),\s+for\s+(?P<violation>.+?)\s+violations?"
         r"(?:\s+in\s+(?P<location>.*?))?,\s*(?P<penalty>\$[\d,]+(?:\.\d{2})?)\.?$",
         re.IGNORECASE,
     )
-    for item in parser.list_items:
-        match = pattern.match(item.strip())
+    for item in items:
+        match = pattern.match(_plain_markdown(item).strip())
         if not match:
             continue
         results.append(
@@ -252,21 +308,95 @@ def _list_records(parser: _ReportHtmlParser, source_url: str) -> list[dict[str, 
     return results
 
 
-def parse_report_page(html: str, *, source_url: str) -> tuple[list[dict[str, str]], int | None]:
-    parser = _ReportHtmlParser()
-    parser.feed(html or "")
-    expected = _expected_case_count(parser.visible_text)
-    records = _table_records(parser, source_url) + _list_records(parser, source_url)
-
-    deduped: list[dict[str, str]] = []
+def _dedupe(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in records:
         fingerprint = _fingerprint(row)
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
-        deduped.append(row)
-    return deduped, expected
+        result.append(row)
+    return result
+
+
+def parse_report_page(html: str, *, source_url: str) -> tuple[list[dict[str, str]], int | None]:
+    parser = _ReportHtmlParser()
+    parser.feed(html or "")
+    expected = _expected_case_count(parser.visible_text)
+    records = _table_records(parser, source_url) + _list_records(parser, source_url)
+    return _dedupe(records), expected
+
+
+def parse_report_markdown(markdown: str, *, source_url: str) -> tuple[list[dict[str, str]], int | None]:
+    expected = _expected_case_count(markdown or "")
+    lines = (markdown or "").splitlines()
+    records: list[dict[str, str]] = []
+    bullet_items: list[str] = []
+
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if line.startswith(('-', '*')):
+            bullet_items.append(line.lstrip('-* ').strip())
+        if not (line.startswith("|") and line.endswith("|")):
+            index += 1
+            continue
+
+        headers = [_norm(_plain_markdown(cell)) for cell in line.strip("|").split("|")]
+        if not any("company or individual" in cell for cell in headers) or "net penalty" not in headers:
+            index += 1
+            continue
+
+        header_map: dict[str, int] = {}
+        for cell_index, value in enumerate(headers):
+            if "public date" in value:
+                header_map["date"] = cell_index
+            elif "company or individual" in value:
+                header_map["company"] = cell_index
+            elif "violation location" in value:
+                header_map["location"] = cell_index
+            elif value == "violation" or "violation description" in value or "violation s" in value:
+                header_map["violation"] = cell_index
+            elif "net penalty" in value:
+                header_map["penalty"] = cell_index
+            elif "case type" in value:
+                header_map["case_type"] = cell_index
+
+        index += 1
+        if index < len(lines) and re.match(r"^\|?\s*:?-{3,}", lines[index].strip()):
+            index += 1
+
+        while index < len(lines):
+            row_line = lines[index].strip()
+            if not (row_line.startswith("|") and row_line.endswith("|")):
+                break
+            cells = [_plain_markdown(cell.strip()) for cell in row_line.strip("|").split("|")]
+
+            def cell(name: str) -> str:
+                idx = header_map.get(name)
+                return cells[idx].strip() if idx is not None and idx < len(cells) else ""
+
+            party = cell("company")
+            violation = cell("violation")
+            penalty = cell("penalty")
+            if party and violation and penalty:
+                records.append(
+                    {
+                        "Company or individual(s)": party,
+                        "Public date": cell("date"),
+                        "Violation location": cell("location"),
+                        "Violation description": violation,
+                        "Net penalty": penalty,
+                        "Case type": cell("case_type"),
+                        "Source URL": source_url,
+                    }
+                )
+            index += 1
+        continue
+
+    records.extend(_bullet_records(bullet_items, source_url))
+    return _dedupe(records), expected
 
 
 def _response_html(response: httpx.Response, *, label: str) -> str:
@@ -277,9 +407,80 @@ def _response_html(response: httpx.Response, *, label: str) -> str:
     if "html" not in content_type and "<html" not in text[:4096].casefold() and "<!doctype html" not in text[:4096].casefold():
         raise MpcaReportError(f"{label} did not return HTML.")
     lowered = text[:262144].casefold()
-    if any(marker in lowered for marker in ("hcaptcha", "g-recaptcha", "radware captcha", "validate.perfdrive.com")):
+    challenge_phrases = (
+        "radware captcha page",
+        "captcha.perfdrive.com",
+        "please solve this captcha",
+        "we apologize for the inconvenience",
+        "widget containing checkbox for hcaptcha",
+    )
+    if any(marker in lowered for marker in challenge_phrases):
         raise MpcaReportError(f"{label} returned a CAPTCHA/security challenge.")
     return text
+
+
+def _reader_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "text/plain",
+        "User-Agent": "ParalegalResearchDesk/2.0",
+        "X-Engine": "browser",
+        "X-Timeout": "30",
+        "X-No-Cache": "true",
+    }
+    api_key = os.environ.get("JINA_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _reader_fetch(target_url: str, *, transport: httpx.BaseTransport | None = None) -> str:
+    if not target_url.startswith("https://www.pca.state.mn.us/"):
+        raise MpcaReportError(f"MPCA reader refused target outside the official MPCA host: {target_url}")
+
+    reader_url = JINA_READER_BASE + target_url
+    last_status: int | None = None
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            with httpx.Client(
+                transport=transport,
+                follow_redirects=True,
+                timeout=60.0,
+                headers=_reader_headers(),
+            ) as reader:
+                response = reader.get(reader_url)
+            last_status = response.status_code
+            if response.status_code == 200 and response.text.strip():
+                return response.text
+            if response.status_code == 401:
+                raise MpcaReportError("Public-page reader rejected the optional JINA_API_KEY.")
+            if response.status_code not in READER_RETRYABLE_STATUSES:
+                raise MpcaReportError(f"Public-page reader returned HTTP {response.status_code}.")
+        except MpcaReportError:
+            raise
+        except (httpx.TimeoutException, httpx.HTTPError) as exc:
+            last_error = exc
+
+        if attempt == 0:
+            time.sleep(1.0)
+
+    detail = f"HTTP {last_status}" if last_status is not None else repr(last_error)
+    raise MpcaReportError(f"Public-page reader could not retrieve the official MPCA page ({detail}).")
+
+
+def _validate_page_records(records: list[dict[str, str]], expected: int | None, *, label: str) -> None:
+    if not records:
+        raise MpcaReportError(f"{label}: no monetary enforcement rows were recognized.")
+
+    minimum = min(MIN_REPORT_ROWS_PER_PAGE, expected) if expected else MIN_REPORT_ROWS_PER_PAGE
+    if len(records) < max(1, minimum):
+        raise MpcaReportError(
+            f"{label}: only {len(records)} monetary enforcement rows were recognized; expected at least {minimum}."
+        )
+    if expected is not None and len(records) > expected:
+        raise MpcaReportError(
+            f"{label}: parsed {len(records)} monetary rows but the page reports only {expected} total enforcement cases."
+        )
 
 
 def fetch_official_report_dataset(
@@ -288,55 +489,81 @@ def fetch_official_report_dataset(
     report_urls: tuple[str, ...] | None = None,
     discover: bool = True,
     min_total_records: int = MIN_TOTAL_REPORT_RECORDS,
+    reader_transport: httpx.BaseTransport | None = None,
+    allow_reader_fallback: bool = True,
 ) -> MpcaReportDataset:
     urls = list(report_urls or KNOWN_REPORT_URLS)
     warnings: list[str] = []
 
     if discover:
+        discovered: list[str] = []
         try:
             search_response = client.get(SEARCH_URL)
             search_html = _response_html(search_response, label="MPCA site search")
-            for url in discover_report_urls(search_html):
-                if url not in urls:
-                    urls.append(url)
-        except (httpx.HTTPError, MpcaReportError) as exc:
-            warnings.append(f"MPCA report discovery could not refresh: {exc}")
+            discovered = discover_report_urls(search_html)
+        except (httpx.HTTPError, MpcaReportError) as direct_exc:
+            if allow_reader_fallback:
+                try:
+                    search_markdown = _reader_fetch(SEARCH_URL, transport=reader_transport)
+                    discovered = discover_report_urls_markdown(search_markdown)
+                    warnings.append(
+                        f"MPCA site-search discovery used the public-page reader because the workstation request failed: {direct_exc}"
+                    )
+                except MpcaReportError as reader_exc:
+                    warnings.append(
+                        f"MPCA report discovery could not refresh. Direct: {direct_exc}. Reader: {reader_exc}"
+                    )
+            else:
+                warnings.append(f"MPCA report discovery could not refresh: {direct_exc}")
+        for url in discovered:
+            if url not in urls:
+                urls.append(url)
 
     rows: list[dict[str, str]] = []
     successful_urls: list[str] = []
     failed_urls: list[str] = []
 
     for url in urls:
+        direct_error: Exception | None = None
+        page_rows: list[dict[str, str]] = []
+        expected: int | None = None
+        fetched_via = "official_mpca_html"
+
         try:
             response = client.get(url)
             html = _response_html(response, label=f"MPCA enforcement report {url}")
             page_rows, expected = parse_report_page(html, source_url=url)
-            if not page_rows:
-                raise MpcaReportError("no enforcement rows were recognized")
-            if expected:
-                minimum = max(1, int(expected * MIN_PAGE_COVERAGE_RATIO))
-                if len(page_rows) < minimum:
-                    raise MpcaReportError(
-                        f"parsed {len(page_rows)} rows but page reports {expected} cases; minimum accepted coverage is {minimum}"
-                    )
-            rows.extend(page_rows)
-            successful_urls.append(url)
+            _validate_page_records(page_rows, expected, label=url)
         except (httpx.HTTPError, MpcaReportError) as exc:
-            failed_urls.append(url)
-            warnings.append(f"MPCA report page unavailable or incomplete: {url}: {exc}")
+            direct_error = exc
+            if allow_reader_fallback:
+                try:
+                    markdown = _reader_fetch(url, transport=reader_transport)
+                    page_rows, expected = parse_report_markdown(markdown, source_url=url)
+                    _validate_page_records(page_rows, expected, label=url)
+                    fetched_via = "public_page_reader"
+                except MpcaReportError as reader_exc:
+                    failed_urls.append(url)
+                    warnings.append(
+                        f"MPCA report page unavailable or incomplete: {url}. Direct: {direct_error}. Reader: {reader_exc}"
+                    )
+                    continue
+            else:
+                failed_urls.append(url)
+                warnings.append(f"MPCA report page unavailable or incomplete: {url}: {direct_error}")
+                continue
 
-    deduped: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for row in rows:
-        fingerprint = _fingerprint(row)
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        deduped.append(row)
+        rows.extend(page_rows)
+        successful_urls.append(url)
+        if fetched_via == "public_page_reader":
+            warnings.append(
+                f"Official MPCA report page was retrieved through the public-page reader because the workstation request was challenged: {url}"
+            )
 
+    deduped = _dedupe(rows)
     if len(deduped) < max(1, int(min_total_records)):
         raise MpcaReportError(
-            f"Official MPCA report fallback produced only {len(deduped)} validated records; "
+            f"Official MPCA report fallback produced only {len(deduped)} validated monetary-enforcement records; "
             f"minimum required is {min_total_records}."
         )
 
@@ -359,6 +586,10 @@ def fetch_official_report_dataset(
         warnings.append(
             "The official report-page dataset is intentionally partial because one or more report pages could not be validated."
         )
+    warnings.append(
+        "MPCA report headlines count all enforcement cases, while these tables enumerate monetary-penalty cases. "
+        "The fallback validates the monetary rows independently and never treats the headline total as the expected table row count."
+    )
     warnings.append(
         "The MPCA report-page fallback covers published enforcement summaries beginning with the second half of 2023; "
         "it is evidence-capable but not an all-history clean-negative source."
