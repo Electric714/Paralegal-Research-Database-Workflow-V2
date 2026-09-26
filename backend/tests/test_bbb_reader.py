@@ -41,6 +41,17 @@ Customer Complaints Summary
 3 total complaints in the last 3 years.
 1 complaint closed in the last 12 months.
 """
+SUMMARY_ONLY_AFTER_LONG_PREAMBLE = (
+    "Title: Multi-location Business | BBB Complaints | Better Business Bureau\n"
+    + "\n".join(
+        f"### Location {index}\n{index} Example Street Example City, WI 53703"
+        for index in range(1, 140)
+    )
+    + "\n## Customer Complaints Summary\n"
+    + "76 total complaints in the last 3 years.\n"
+    + "20 complaints closed in the last 12 months.\n"
+    + "## If you've experienced an issue\n"
+)
 
 
 @pytest.fixture()
@@ -69,6 +80,28 @@ def test_reader_search_parser_extracts_exact_bbb_card_identity():
 def test_reader_complaint_parser_handles_zero_and_positive_counts():
     assert parse_complaint_summary(ZERO_COMPLAINTS) == (0, None)
     assert parse_complaint_summary(POSITIVE_COMPLAINTS) == (3, 1)
+
+
+def test_reader_complaint_parser_prefers_summary_heading_after_long_location_content():
+    # BBB multi-location complaint pages can expose Customer Complaints Summary
+    # without a separate # Complaints heading. The previous 3,000-character
+    # window anchored to the title could miss the actual summary and falsely
+    # report LAYOUT_CHANGED.
+    assert len(SUMMARY_ONLY_AFTER_LONG_PREAMBLE) > 3000
+    assert parse_complaint_summary(SUMMARY_ONLY_AFTER_LONG_PREAMBLE) == (76, 20)
+
+
+def test_reader_complaint_parser_does_not_use_numbers_from_initial_complaint_prose():
+    page = """
+    Title: Example Business | BBB Complaints | Better Business Bureau
+    # Complaints
+    ## If you've experienced an issue
+    Submit a Complaint
+    ### Initial Complaint
+    The customer wrote that they filed 9 complaints in the last 3 years and
+    4 complaints closed in the last 12 months with another organization.
+    """
+    assert parse_complaint_summary(page) == (None, None)
 
 
 def test_bbb_production_reader_path_avoids_local_bbb_block(isolated_db):
