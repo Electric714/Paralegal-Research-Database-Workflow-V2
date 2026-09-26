@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
-
 import httpx
 import pytest
 
@@ -17,7 +14,12 @@ from app.research.models import (
 )
 from app.research.service import list_tasks, persist_source_result
 from app.research.sources.base import ContractorContext, ResearchSource
-from app.research.sources.mn_pca import MinnesotaPcaEnforcementSource
+from app.research.sources.mn_pca import (
+    CSV_EXPORT_URL,
+    DATA_VIEW_URL,
+    LANDING_URL,
+    MinnesotaPcaEnforcementSource,
+)
 from app.sources import SOURCES
 
 
@@ -50,21 +52,22 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def _mpca_source(body: str) -> MinnesotaPcaEnforcementSource:
-    candidate = next(csv.DictReader(io.StringIO(body)))["Company or individual(s)"]
-
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/wimn/sites"
+        if str(request.url) in {LANDING_URL, DATA_VIEW_URL}:
+            return httpx.Response(200, text="<html>fixture warmup</html>", request=request)
+        assert str(request.url) == CSV_EXPORT_URL
         return httpx.Response(
             200,
-            json={
-                "data": [{"siteId": "fixture-1", "siteName": candidate, "ownerName": candidate}],
-                "recordCount": 1,
-            },
+            text=body,
+            headers={"content-type": "text/csv"},
             request=request,
         )
 
     return MinnesotaPcaEnforcementSource(
-        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
+        min_expected_records=1,
+        allow_browser_fallback=False,
+        allow_cached_fallback=False,
     )
 
 
