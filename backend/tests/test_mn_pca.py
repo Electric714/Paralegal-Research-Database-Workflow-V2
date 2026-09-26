@@ -219,7 +219,7 @@ def test_direct_tableau_clean_no_match_is_safe_research_negative_only():
     assert result.completeness_status == CompletenessStatus.COMPLETE
     assert result.is_clean_negative is True
     assert result.evidence == []
-    assert "never proposes" in result.normalized_payload["negative_semantics"]
+    assert "never propose" in result.normalized_payload["negative_semantics"]
 
 
 def test_captcha_on_direct_export_uses_browser_context_tableau_export():
