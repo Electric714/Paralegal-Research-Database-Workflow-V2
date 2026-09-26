@@ -8,11 +8,13 @@ on:
       - backend/app/research/sources/osha.py
       - backend/app/research/sources/osha_bulk.py
       - backend/app/research/sources/osha_operational.py
+      - backend/app/research/sources/osha_indexed.py
       - backend/app/research/sources/osha_resilient.py
       - backend/app/research/source_registry.py
       - backend/tests/test_osha_source.py
       - backend/tests/test_osha_bulk.py
       - backend/tests/test_osha_operational.py
+      - backend/tests/test_osha_indexed.py
       - backend/tests/test_resilient_bbb_osha.py
       - scripts/osha_live_audit.py
       - scripts/refresh_osha_bulk.py
@@ -42,6 +44,7 @@ jobs:
             app/research/sources/osha.py \
             app/research/sources/osha_bulk.py \
             app/research/sources/osha_operational.py \
+            app/research/sources/osha_indexed.py \
             app/research/sources/osha_resilient.py \
             app/research/source_registry.py
       - name: Run OSHA regression suite
@@ -51,4 +54,5 @@ jobs:
             tests/test_osha_source.py \
             tests/test_osha_bulk.py \
             tests/test_osha_operational.py \
+            tests/test_osha_indexed.py \
             tests/test_resilient_bbb_osha.py
