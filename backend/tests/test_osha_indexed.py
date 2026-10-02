@@ -77,6 +77,7 @@ def test_nonexact_multiword_lookup_stays_on_compound_queries(tmp_path):
 
     metric = source._query_diagnostics[("american contractors associates group", "WI")]
     assert metric["exact_fast_path"] is False
-    assert metric["queries_executed"][0] == '"american" AND "contractors" AND "associates" AND "group"'
-    assert all(" AND " in query for query in metric["queries_executed"][1:])
+    assert metric["queries_executed"][0] == "normalized_name_exact"
+    assert metric["queries_executed"][1] == '"american" AND "contractors" AND "associates" AND "group"'
+    assert all(" AND " in query for query in metric["queries_executed"][2:])
     assert all(query != '"contractors"' for query in metric["queries_executed"])
