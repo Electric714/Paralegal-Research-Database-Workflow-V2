@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+
 import httpx
 import pytest
 
@@ -14,12 +16,7 @@ from app.research.models import (
 )
 from app.research.service import list_tasks, persist_source_result
 from app.research.sources.base import ContractorContext, ResearchSource
-from app.research.sources.mn_pca import (
-    CSV_EXPORT_URL,
-    DATA_VIEW_URL,
-    LANDING_URL,
-    MinnesotaPcaEnforcementSource,
-)
+from app.research.sources.mn_pca import MinnesotaPcaEnforcementSource
 from app.sources import SOURCES
 
 
@@ -52,14 +49,26 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def _mpca_source(body: str) -> MinnesotaPcaEnforcementSource:
+    report_url = "https://www.pca.state.mn.us/news-and-stories/mpca-completes-2-enforcement-cases-in-first-half-of-2026"
+    html = (
+        "<html><body><h1>MPCA completed 2 enforcement cases in first half of 2026</h1><table>"
+        "<tr><th>Public date</th><th>Company or individual(s)</th><th>Violation location</th>"
+        "<th>Violation description</th><th>Net penalty</th></tr>"
+    )
+    for line in body.splitlines()[1:]:
+        party, public_date, location, violation, penalty, _case = next(csv.reader([line]))
+        html += (
+            f"<tr><td>{public_date}</td><td>{party}</td><td>{location}</td>"
+            f"<td>{violation}</td><td>{penalty}</td></tr>"
+        )
+    html += "</table></body></html>"
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) in {LANDING_URL, DATA_VIEW_URL}:
-            return httpx.Response(200, text="<html>fixture warmup</html>", request=request)
-        assert str(request.url) == CSV_EXPORT_URL
+        assert str(request.url) == report_url
         return httpx.Response(
             200,
-            text=body,
-            headers={"content-type": "text/csv"},
+            text=html,
+            headers={"content-type": "text/html"},
             request=request,
         )
 
@@ -68,6 +77,10 @@ def _mpca_source(body: str) -> MinnesotaPcaEnforcementSource:
         min_expected_records=1,
         allow_browser_fallback=False,
         allow_cached_fallback=False,
+        include_pdfs=False,
+        report_urls=(report_url,),
+        discover_report_urls=False,
+        report_min_records=1,
     )
 
 

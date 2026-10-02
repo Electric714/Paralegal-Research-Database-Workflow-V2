@@ -12,9 +12,9 @@ The Office of State Procurement page is the authoritative public master list use
 
 ## Acquisition
 
-The adapter performs one ordinary HTTP GET during `prepare()` for the whole research run. It does not submit one network request per bidder and does not use browser automation.
+The adapter loads the official page once per cache window in a normal Chromium session, with a persistent browser profile so cookies from a successful load are reused. It waits for the result-count text that the page itself renders. It does not solve, click, or retry through a challenge. A direct HTTP request with a normal browser header is used only when no browser runtime is available.
 
-The downloaded HTML is SHA-256 hashed and stored immutably under the application's source cache. Every bidder result from that prepared dataset carries the same artifact hash/path so the research evidence remains traceable to the exact page bytes used for the comparison.
+A validated complete list is cached locally for 12 hours with the source URL, retrieval time, and SHA-256. Later bidders in that window are matched against the cache and do not hit the site again. A challenge page, an incomplete result window, or a stale cache is an explicit non-negative failure.
 
 A clean no-match is allowed only when the source page passes completeness validation. The parser requires the Minnesota `Results 1 - N of N` count, requires the page to expose the complete result window, requires every listed vendor name to have its detail block, and requires the number of parsed records to match the reported count. Missing counts, missing detail blocks, incomplete result windows, malformed dates, HTTP failures, and layout changes are explicit non-negative statuses.
 

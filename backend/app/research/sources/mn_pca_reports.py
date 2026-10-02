@@ -14,7 +14,27 @@ from urllib.parse import urljoin
 import httpx
 
 
+COMPLIANCE_URL = "https://www.pca.state.mn.us/trending-topics/compliance-and-enforcement"
 SEARCH_URL = "https://www.pca.state.mn.us/search?search=enforcement%20cases%20at%20MPCA"
+_PDF_CASE_RE = re.compile(r"\b(?P<date>\d{1,2}/\d{1,2}/\d{4})\s+(?P<case>STIP|APO)\b")
+_LEGAL_SUFFIX_RE = re.compile(r"\b(?:LLC|L\.L\.C\.|Inc\.?|Co\.|Corp\.?|Corporation|Company|LLP|LP)\b\.?", re.I)
+_VIOLATION_PREFIXES = (
+    "air quality",
+    "hazardous waste",
+    "construction stormwater",
+    "municipal wastewater",
+    "municipal separate",
+    "subsurface",
+    "solid waste",
+    "underground",
+    "industrial",
+    "electronic waste",
+    "water quality",
+    "feedlot",
+    "stormwater",
+    "wastewater",
+    "ssts",
+)
 JINA_READER_BASE = "https://r.jina.ai/"
 KNOWN_REPORT_URLS = (
     "https://www.pca.state.mn.us/news-and-stories/mpca-completes-118-enforcement-cases-in-second-half-of-2023",
@@ -44,6 +64,9 @@ class MpcaReportDataset:
     warnings: tuple[str, ...]
     scope_start: str
     scope_end: str
+    retrieved_at: str = ""
+    counts_reconciled: bool = False
+    document_hashes: tuple[tuple[str, str, int, int | None], ...] = ()
 
 
 class _ReportHtmlParser(HTMLParser):
@@ -483,6 +506,74 @@ def _validate_page_records(records: list[dict[str, str]], expected: int | None, 
         )
 
 
+def discover_pdf_urls(html: str, *, base_url: str = COMPLIANCE_URL) -> list[str]:
+    parser = _ReportHtmlParser()
+    parser.feed(html or "")
+    urls: list[str] = []
+    for href, _label in parser.links:
+        absolute = urljoin(base_url, href).split("#", 1)[0]
+        if re.search(r"/gp2-20\d{2}\.pdf$", absolute, re.IGNORECASE) and absolute not in urls:
+            urls.append(absolute)
+    return urls
+
+
+def _split_pdf_party(head: str) -> tuple[str, str]:
+    matches = list(_LEGAL_SUFFIX_RE.finditer(head))
+    if not matches:
+        return head.strip(" ,"), ""
+    end = matches[-1].end()
+    return head[:end].strip(" ,"), head[end:].strip(" ,")
+
+
+def parse_report_pdf(content: bytes, *, source_url: str) -> tuple[list[dict[str, str]], int]:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(content))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    text = re.sub(r"Page \d+ of \d+", " ", text)
+    text = re.sub(r"Enforcement case summary[^\n]*", " ", text)
+    text = re.sub(r"Public date Case type[\s\S]*?Net penalty", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    date_count = len(_PDF_CASE_RE.findall(text))
+    parts = _PDF_CASE_RE.split(text)
+    # split keeps the capturing groups, so records start after the preamble
+    records: list[dict[str, str]] = []
+    index = 1
+    while index + 2 < len(parts):
+        public_date = parts[index]
+        case_type = parts[index + 1]
+        rest = parts[index + 2]
+        index += 3
+        penalties = re.findall(r"\$[\d,]+", rest)
+        if not penalties:
+            continue
+        penalty = penalties[-1]
+        body = rest[: rest.rfind(penalty)]
+        lowered = body.lower()
+        cut = len(body)
+        for prefix in _VIOLATION_PREFIXES:
+            found = lowered.find(prefix)
+            if found != -1:
+                cut = min(cut, found)
+        head = re.sub(r"\s+", " ", body[:cut]).strip(" -–")
+        violation = re.sub(r"\s+", " ", body[cut:]).strip(" -–")
+        party, location = _split_pdf_party(head)
+        if len(party) < 3 or not violation:
+            continue
+        records.append(
+            {
+                "Company or individual(s)": party,
+                "Public date": public_date,
+                "Violation location": location,
+                "Violation description": violation,
+                "Net penalty": penalty,
+                "Case type": case_type,
+                "Source URL": source_url,
+            }
+        )
+    return _dedupe(records), date_count
+
+
 def fetch_official_report_dataset(
     client: httpx.Client,
     *,
@@ -491,9 +582,13 @@ def fetch_official_report_dataset(
     min_total_records: int = MIN_TOTAL_REPORT_RECORDS,
     reader_transport: httpx.BaseTransport | None = None,
     allow_reader_fallback: bool = True,
+    include_pdfs: bool = False,
 ) -> MpcaReportDataset:
     urls = list(report_urls or KNOWN_REPORT_URLS)
     warnings: list[str] = []
+    retrieved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    document_hashes: list[tuple[str, str, int, int | None]] = []
+    page_reconciled: list[bool] = []
 
     if discover:
         discovered: list[str] = []
@@ -555,16 +650,74 @@ def fetch_official_report_dataset(
 
         rows.extend(page_rows)
         successful_urls.append(url)
+        if fetched_via == "official_mpca_html":
+            raw_doc = response.content
+        else:
+            raw_doc = markdown.encode("utf-8")
+        document_hashes.append((url, hashlib.sha256(raw_doc).hexdigest(), len(page_rows), expected))
+        page_reconciled.append(expected is not None and len(page_rows) == expected)
+        if expected is not None and len(page_rows) != expected:
+            warnings.append(
+                f"{url} published {len(page_rows)} parsed enforcement rows against a stated count of {expected}. "
+                "The rows are retained as evidence, but this document is incomplete and cannot support a clean no-match."
+            )
         if fetched_via == "public_page_reader":
             warnings.append(
                 f"Official MPCA report page was retrieved through the public-page reader because the workstation request was challenged: {url}"
             )
 
+    pdf_reconciled = True
+    if include_pdfs:
+        pdf_urls: list[str] = []
+        try:
+            landing = client.get(COMPLIANCE_URL)
+            landing_html = _response_html(landing, label="MPCA compliance page")
+            pdf_urls = discover_pdf_urls(landing_html)
+            document_hashes.append(
+                (COMPLIANCE_URL, hashlib.sha256(landing.content).hexdigest(), len(pdf_urls), len(pdf_urls))
+            )
+        except (httpx.HTTPError, MpcaReportError) as exc:
+            pdf_reconciled = False
+            warnings.append(f"Official MPCA PDF discovery failed: {exc}")
+        for pdf_url in pdf_urls:
+            try:
+                pdf_response = client.get(pdf_url)
+                if pdf_response.status_code >= 400:
+                    raise MpcaReportError(f"{pdf_url} returned HTTP {pdf_response.status_code}.")
+                if not pdf_response.content.startswith(b"%PDF"):
+                    raise MpcaReportError(f"{pdf_url} was not a PDF.")
+                pdf_rows, date_count = parse_report_pdf(pdf_response.content, source_url=pdf_url)
+                if not pdf_rows:
+                    raise MpcaReportError(f"{pdf_url} contained no parseable enforcement rows.")
+                coverage = (len(pdf_rows) / date_count) if date_count else 0
+                document_hashes.append(
+                    (pdf_url, hashlib.sha256(pdf_response.content).hexdigest(), len(pdf_rows), date_count)
+                )
+                if coverage < 0.9:
+                    pdf_reconciled = False
+                    warnings.append(
+                        f"{pdf_url} parsed {len(pdf_rows)} of {date_count} dated case markers. "
+                        "Those rows were discarded so a changed PDF layout cannot create false matches."
+                    )
+                    continue
+                rows.extend(pdf_rows)
+                successful_urls.append(pdf_url)
+                if len(pdf_rows) != date_count:
+                    pdf_reconciled = False
+                    warnings.append(
+                        f"{pdf_url} parsed {len(pdf_rows)} rows from {date_count} dated case markers. "
+                        "PDF rows stay evidence-only until the counts match."
+                    )
+            except (httpx.HTTPError, MpcaReportError) as exc:
+                pdf_reconciled = False
+                warnings.append(f"Official MPCA PDF was not accepted: {pdf_url}: {exc}")
+
     deduped = _dedupe(rows)
     if len(deduped) < max(1, int(min_total_records)):
+        detail = " | ".join(warnings)
         raise MpcaReportError(
             f"Official MPCA report fallback produced only {len(deduped)} validated monetary-enforcement records; "
-            f"minimum required is {min_total_records}."
+            f"minimum required is {min_total_records}. {detail}"
         )
 
     buffer = io.StringIO(newline="")
@@ -582,18 +735,12 @@ def fetch_official_report_dataset(
     writer.writerows(deduped)
     raw = buffer.getvalue().encode("utf-8")
 
-    if failed_urls:
+    counts_reconciled = bool(page_reconciled) and all(page_reconciled) and not failed_urls and pdf_reconciled
+    if failed_urls or not counts_reconciled:
         warnings.append(
-            "The official report-page dataset is intentionally partial because one or more report pages could not be validated."
+            "At least one official MPCA document was missing, short, or had a stated count that did not match the parsed rows. "
+            "Findings may still be used. A clean no-match is not allowed."
         )
-    warnings.append(
-        "MPCA report headlines count all enforcement cases, while these tables enumerate monetary-penalty cases. "
-        "The fallback validates the monetary rows independently and never treats the headline total as the expected table row count."
-    )
-    warnings.append(
-        "The MPCA report-page fallback covers published enforcement summaries beginning with the second half of 2023; "
-        "it is evidence-capable but not an all-history clean-negative source."
-    )
 
     return MpcaReportDataset(
         csv_bytes=raw,
@@ -604,4 +751,7 @@ def fetch_official_report_dataset(
         warnings=tuple(warnings),
         scope_start="2023-07-01",
         scope_end="present published summaries",
+        retrieved_at=retrieved_at,
+        counts_reconciled=counts_reconciled,
+        document_hashes=tuple(document_hashes),
     )

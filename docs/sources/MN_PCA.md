@@ -6,42 +6,32 @@ This adapter answers one narrow bidder-database question: whether an approved bi
 
 ## Authoritative sources
 
-The preferred complete acquisition target is the official MPCA **Enforcement actions with penalties** Tableau dataset.
+The acquisition source is MPCA's own public enforcement publications on `www.pca.state.mn.us`: the semiannual enforcement-case news pages and the downloadable `gp2-YYYY.pdf` case summaries linked from the compliance and enforcement page.
 
-When the Tableau host is unavailable or presents its Radware/hCaptcha challenge, the adapter falls back to official `pca.state.mn.us` enforcement-report pages published by MPCA itself. These pages contain the agency's recurring mid-year and end-of-year monetary-enforcement case tables.
-
-The adapter does **not** use the MPCA WIMN REST API and does not use a CAPTCHA-solving service.
+The adapter does not call the Tableau host `data.pca.state.mn.us`. That host's detail exports sit behind a Radware challenge and are not used. It also does not use the MPCA WIMN REST API or any CAPTCHA-solving service.
 
 ## Acquisition order
 
-The source attempts acquisition in this order:
+1. Download the known official news pages, plus any newer matching pages discovered from MPCA site search, with an ordinary HTTP GET.
+2. Download the official `gp2` PDFs linked from the compliance page and parse their case rows.
+3. Cache the combined CSV with a manifest of source URL, retrieval time, SHA-256, parsed count, and stated count.
+4. If the live documents fail, a recent cache can still surface findings. A cache-only result is never a clean no-match.
 
-1. A browser-like direct HTTP session warms the official MPCA compliance page and Tableau view and requests the structured Tableau CSV.
-2. If that fails, a local Chromium-family browser context opens the Tableau view and requests the CSV with normal browser state.
-3. If the background browser is challenged, a persistent headed Edge/Chrome profile is attempted.
-4. If the Tableau routes remain blocked, the adapter fetches MPCA's own enforcement-summary pages on `www.pca.state.mn.us`, parses their monetary-enforcement tables and lower-penalty case lists, validates the records, and combines them into an evidence dataset.
-5. If the workstation IP is also challenged on an ordinary MPCA report page, the adapter may retrieve that same public MPCA page through the project's public-page reader transport. The canonical evidence URL remains the official `pca.state.mn.us` page; the reader is only a transport layer and is not an MPCA data API.
-6. If a recent previously validated full Tableau extract is available, it may be merged with fresh report-page evidence to broaden historical coverage.
+A document is count-validated only when the number of parsed rows equals the count that document states. If any document is missing, short, blocked, or mismatched, the dataset is partial. Partial data can support a positive finding or an identity review. It cannot become `SUCCESS_NO_MATCH` and it cannot propose `environmental_violations = N`.
 
-There is no CAPTCHA-solving or challenge-bypass code. The report-page path prevents the CAPTCHA-protected Tableau host from being a single point of failure while keeping evidence grounded in MPCA's own published pages.
+## Official pages and PDFs
 
-## Tableau validation
+Known news pages start with the second half of 2023 and include both halves of 2024 and 2025 plus the first half of 2026. The compliance page also links `gp2-2024.pdf` and `gp2-2025.pdf`.
 
-A live Tableau extract is considered complete only when it has:
+Headlines often count every closed case, including cases the monetary table does not list. When the parsed row count does not equal that stated count, the page is retained as evidence and marked incomplete.
 
-- a recognizable company/regulated-party column
-- a recognizable violation column
-- detail rows rather than a summary sheet
-- a minimum production row-count sanity check
-- deterministic record fingerprints and a SHA-256 dataset hash
+## Validation
 
-HTML, CAPTCHA pages, HTTP failures, timeouts, schema changes, and suspiciously small extracts all fail closed.
+Each downloaded file is hashed. A page or PDF is count-validated only when parsed rows equal the count stated by that file. HTML, challenge pages, HTTP failures, timeouts, and schema changes fail closed. A suspiciously small extract also fails closed against the production row floor.
 
-Only a successfully validated **live full Tableau extract** can support a complete `SUCCESS_NO_MATCH` result.
+A complete `SUCCESS_NO_MATCH` is allowed only when every fetched document is count-validated. Otherwise the result stays partial.
 
-## Official report-page fallback
-
-The report fallback currently uses MPCA's published enforcement summaries beginning with the second half of 2023 and discovers newer matching report pages from MPCA's normal site search. Known pages include the second half of 2023, both halves of 2024, both halves of 2025, and the first half of 2026.
+## Parser
 
 For each report page the parser:
 
@@ -49,21 +39,14 @@ For each report page the parser:
 - ignores responsive Tablesaw accessibility labels so they cannot contaminate company names or other cell values
 - extracts company/individual name, public date, violation location, violation description, net penalty, and case type when present
 - also extracts lower-dollar cases that MPCA publishes as list items rather than table rows
-- preserves the exact official MPCA report-page URL as evidence provenance
+- preserves the exact official MPCA URL as evidence provenance
 - deduplicates repeated case records
-- validates that monetary-enforcement records were actually recovered before accepting a page
 
-MPCA report headlines count all completed enforcement cases, including cases without monetary penalties. The monetary-enforcement table is therefore intentionally smaller than the headline count. The adapter does not incorrectly require the table to equal a fixed percentage of the headline total.
-
-Because these published reports do not establish complete all-history coverage, the report-page dataset is explicitly **partial scope**. It can establish a positive finding or an ambiguous identity candidate, but a bidder absent from those pages receives `PARTIAL_RESULTS`, not `SUCCESS_NO_MATCH`.
-
-This distinction is deliberate: a Tableau CAPTCHA must not prevent the remaining bidders from being researched, but incomplete historical coverage must never become a false clean negative.
+The PDF parser reads the same fields from `gp2` case summaries and splits a trailing location off a legal-suffix company name when that suffix is present.
 
 ## Cache safety
 
-A previously validated full Tableau extract may be cached for short-term continuity. The cache is time-limited and must pass the same parser and row-count validation as the original live export.
-
-Cached findings can be surfaced, but when live complete Tableau data cannot be refreshed, the overall dataset is partial for negative conclusions. A cache-only or report-plus-cache no-match is never a clean negative.
+The combined dataset is cached with its manifest. The cache is time-limited and must pass the same parser validation as a live extract. Cached findings can be surfaced, but a cache-only no-match is never a clean negative.
 
 ## Matching and field semantics
 
@@ -71,7 +54,7 @@ Research scope is limited to `contractor_name` plus explicitly stored `related_c
 
 Confirmed findings emit evidence for `environmental_violations = Y`. Dates, location, violation text, penalty, case type, source party text, official source URL, dataset hash, cache status, and scope status remain supporting evidence.
 
-No acquisition path ever proposes `environmental_violations = N` merely because a name was absent. Only the research status can represent a complete no-match, and only when the live full Tableau dataset was validated.
+No acquisition path proposes `environmental_violations = N` merely because a name was absent. Only a count-validated live document set can support a complete no-match.
 
 ## Reliability contract
 

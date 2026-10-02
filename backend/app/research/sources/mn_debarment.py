@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,21 @@ from ..models import (
     SourceResultStatus,
 )
 from .base import ContractorContext, ResearchSource
+from .public_browser import (
+    BrowserBlockedError,
+    BrowserFetchError,
+    BrowserUnavailableError,
+    PublicBrowserSession,
+    STANDARD_BROWSER_HEADERS,
+)
 
 
 MINNESOTA_DEBARMENT_URL = "https://mn.gov/admin/osp/government/suspended-debarred/"
+DEBARMENT_HOSTS = ("mn.gov", "www.mn.gov")
 DEFAULT_TIMEOUT_SECONDS = 25.0
+CACHE_MAX_AGE_SECONDS = 12 * 60 * 60
+BROWSER_READY_TEXT = "Results 1 -"
+BROWSER_READY_TIMEOUT_MS = 20_000
 FUZZY_REVIEW_CUTOFF = 0.94
 MAX_REVIEW_CANDIDATES = 8
 
@@ -396,10 +408,24 @@ def _action_status(record: MinnesotaVendorRecord, today: date) -> str:
     return "ACTION_STATUS_UNKNOWN"
 
 
+def _html_is_challenge(html: str, final_url: str = "") -> bool:
+    if "perfdrive.com" in (final_url or "").casefold():
+        return True
+    if _RESULTS_RE.search(html or ""):
+        return False
+    sample = (html or "")[:8000].casefold()
+    visible_markers = (
+        "please solve this captcha",
+        "radware bot manager captcha",
+        "radware captcha page",
+    )
+    return any(marker in sample for marker in visible_markers)
+
+
 class MinnesotaDebarredVendorsSource(ResearchSource):
     source_key = "mn_debarment"
     display_name = "Minnesota Suspended/Debarred Vendors"
-    adapter_version = "1.0.0"
+    adapter_version = "1.1.0"
     parser_version = "1.0.0"
 
     def __init__(
@@ -409,24 +435,34 @@ class MinnesotaDebarredVendorsSource(ResearchSource):
         cache_dir: Path | None = None,
         today: date | None = None,
         html_override: str | None = None,
+        browser_session_factory: Any = PublicBrowserSession,
+        allow_browser: bool = True,
+        cache_max_age_seconds: int = CACHE_MAX_AGE_SECONDS,
     ) -> None:
         self.client = client
         self.cache_dir = cache_dir or (db.DATA_DIR / "source_cache" / "mn_debarment")
         self.today = today or date.today()
         self.html_override = html_override
+        self.browser_session_factory = browser_session_factory
+        self.allow_browser = allow_browser
+        self.cache_max_age_seconds = cache_max_age_seconds
         self.records: list[MinnesotaVendorRecord] = []
         self.prepare_failure: MinnesotaDebarmentError | None = None
         self.artifact: RawArtifact | None = None
         self.http_status: int | None = None
+        self.acquisition_method: str | None = None
+        self.retrieved_at: str | None = None
 
     def health_check(self) -> dict[str, Any]:
         return {
             "source_key": self.source_key,
             "implemented": True,
-            "acquisition_mode": "official_html_master_list",
+            "acquisition_mode": "official_page_browser_session_with_local_cache",
             "source_url": MINNESOTA_DEBARMENT_URL,
             "record_count": len(self.records),
             "prepared": bool(self.records) and self.prepare_failure is None,
+            "acquisition_method": self.acquisition_method,
+            "retrieved_at": self.retrieved_at,
         }
 
     def _store_artifact(self, html: str) -> RawArtifact:
@@ -448,6 +484,130 @@ class MinnesotaDebarredVendorsSource(ResearchSource):
             metadata={"source_url": MINNESOTA_DEBARMENT_URL},
         )
 
+    def _cache_paths(self) -> tuple[Path, Path]:
+        return self.cache_dir / "latest.html", self.cache_dir / "latest.json"
+
+    def _read_fresh_cache(self) -> str | None:
+        html_path, meta_path = self._cache_paths()
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            retrieved = datetime.fromisoformat(str(meta["retrieved_at"]))
+            age = (datetime.now(timezone.utc) - retrieved).total_seconds()
+            if age < 0 or age > self.cache_max_age_seconds:
+                return None
+            html = html_path.read_text(encoding="utf-8")
+            digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
+            if digest != meta.get("sha256"):
+                return None
+            if meta.get("source_url") != MINNESOTA_DEBARMENT_URL:
+                return None
+            parse_minnesota_debarment_page(html)
+        except (OSError, ValueError, KeyError, MinnesotaDebarmentError, json.JSONDecodeError):
+            return None
+        self.retrieved_at = str(meta["retrieved_at"])
+        return html
+
+    def _write_fresh_cache(self, html: str) -> None:
+        html_path, meta_path = self._cache_paths()
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            payload = html.encode("utf-8")
+            html_path.write_bytes(payload)
+            retrieved = self.retrieved_at or datetime.now(timezone.utc).isoformat()
+            self.retrieved_at = retrieved
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "source_url": MINNESOTA_DEBARMENT_URL,
+                        "retrieved_at": retrieved,
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "record_count": len(self.records),
+                        "acquisition_method": self.acquisition_method,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def _browser_fetch(self) -> str:
+        session = self.browser_session_factory(
+            allowed_hosts=DEBARMENT_HOSTS,
+            timeout_ms=60_000,
+            headless=True,
+            profile_dir=str(self.cache_dir / "browser-profile"),
+            blocked_retry_wait_ms=0,
+        )
+        try:
+            fetched = session.get_document(
+                MINNESOTA_DEBARMENT_URL,
+                ready_text=BROWSER_READY_TEXT,
+                ready_timeout_ms=BROWSER_READY_TIMEOUT_MS,
+            )
+        finally:
+            close = getattr(session, "close", None)
+            if close is not None:
+                close()
+        if _html_is_challenge(fetched.text, getattr(fetched, "final_url", "")):
+            raise MinnesotaDebarmentError(
+                "Minnesota vendor page presented a security challenge to the browser session.",
+                status=SourceResultStatus.BLOCKED,
+            )
+        if "perfdrive.com" in str(getattr(fetched, "final_url", "")).casefold():
+            raise MinnesotaDebarmentError(
+                "Minnesota vendor page did not return from the Radware interstitial.",
+                status=SourceResultStatus.BLOCKED,
+            )
+        self.retrieved_at = datetime.now(timezone.utc).isoformat()
+        return fetched.text
+
+    def _http_fetch(self) -> str:
+        owns_client = self.client is None
+        client = self.client or httpx.Client(
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            headers=STANDARD_BROWSER_HEADERS,
+        )
+        try:
+            response = client.get(MINNESOTA_DEBARMENT_URL)
+        finally:
+            if owns_client:
+                client.close()
+        if response.status_code in {401, 403, 429} or _html_is_challenge(response.text, str(response.url)):
+            raise MinnesotaDebarmentError(
+                "Minnesota vendor page returned a security challenge to a direct HTTP request.",
+                status=SourceResultStatus.BLOCKED,
+            )
+        if response.status_code >= 400:
+            raise MinnesotaDebarmentError(
+                f"Minnesota vendor page returned HTTP {response.status_code}.",
+                status=SourceResultStatus.HTTP_ERROR,
+            )
+        self.retrieved_at = datetime.now(timezone.utc).isoformat()
+        return response.text
+
+    def _acquire_official_html(self) -> tuple[str, str]:
+        cached = self._read_fresh_cache()
+        if cached is not None:
+            return cached, "fresh_local_cache"
+        if self.allow_browser and self.client is None:
+            try:
+                return self._browser_fetch(), "official_browser_document"
+            except BrowserBlockedError as exc:
+                raise MinnesotaDebarmentError(
+                    f"Minnesota vendor page presented a security challenge: {exc}",
+                    status=SourceResultStatus.BLOCKED,
+                ) from exc
+            except BrowserUnavailableError:
+                pass
+            except BrowserFetchError as exc:
+                raise MinnesotaDebarmentError(
+                    f"Minnesota vendor page browser navigation failed: {exc}",
+                    status=SourceResultStatus.SOURCE_UNAVAILABLE,
+                ) from exc
+        return self._http_fetch(), "official_http_document"
+
     def prepare(self) -> None:
         self.records = []
         self.prepare_failure = None
@@ -457,35 +617,26 @@ class MinnesotaDebarredVendorsSource(ResearchSource):
             if self.html_override is not None:
                 html = self.html_override
                 self.http_status = 200
+                self.acquisition_method = "html_override"
+                self.retrieved_at = datetime.now(timezone.utc).isoformat()
             else:
-                owns_client = self.client is None
-                client = self.client or httpx.Client(
-                    timeout=DEFAULT_TIMEOUT_SECONDS,
-                    follow_redirects=True,
-                    headers={"User-Agent": "ParalegalResearchDatabaseV2/1.0"},
-                )
-                try:
-                    response = client.get(MINNESOTA_DEBARMENT_URL)
-                finally:
-                    if owns_client:
-                        client.close()
-                self.http_status = response.status_code
-                if response.status_code in {401, 403, 429}:
-                    raise MinnesotaDebarmentError(
-                        f"Minnesota vendor page returned HTTP {response.status_code}.",
-                        status=SourceResultStatus.BLOCKED,
-                    )
-                if response.status_code >= 400:
-                    raise MinnesotaDebarmentError(
-                        f"Minnesota vendor page returned HTTP {response.status_code}.",
-                        status=SourceResultStatus.HTTP_ERROR,
-                    )
-                html = response.text
+                html, method = self._acquire_official_html()
+                self.acquisition_method = method
+                self.http_status = 200
 
+            if _html_is_challenge(html):
+                raise MinnesotaDebarmentError(
+                    "Minnesota vendor page returned a security challenge instead of the official list.",
+                    status=SourceResultStatus.BLOCKED,
+                )
             self.records = parse_minnesota_debarment_page(html)
             self.artifact = self._store_artifact(html)
             if self.artifact:
                 self.artifact.metadata["record_count"] = len(self.records)
+                self.artifact.metadata["retrieved_at"] = self.retrieved_at
+                self.artifact.metadata["acquisition_method"] = self.acquisition_method
+            if self.acquisition_method != "fresh_local_cache":
+                self._write_fresh_cache(html)
         except httpx.TimeoutException as exc:
             self.prepare_failure = MinnesotaDebarmentError(
                 f"Minnesota vendor page timed out: {exc}", status=SourceResultStatus.TIMEOUT

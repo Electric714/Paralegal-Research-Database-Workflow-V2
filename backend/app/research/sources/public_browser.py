@@ -101,13 +101,17 @@ class PublicBrowserSession:
         if self.profile_dir:
             profile_path = Path(self.profile_dir).expanduser()
             profile_path.mkdir(parents=True, exist_ok=True)
+            persistent_kwargs = {
+                "user_data_dir": str(profile_path),
+                "headless": self.headless,
+                "locale": "en-US",
+                "user_agent": STANDARD_BROWSER_HEADERS["User-Agent"],
+            }
             for channel in ("msedge", "chrome"):
                 try:
                     self._context = self._playwright.chromium.launch_persistent_context(
-                        user_data_dir=str(profile_path),
                         channel=channel,
-                        headless=self.headless,
-                        locale="en-US",
+                        **persistent_kwargs,
                     )
                     break
                 except Exception as exc:  # pragma: no cover - depends on local browser install
@@ -115,11 +119,7 @@ class PublicBrowserSession:
 
             if self._context is None:
                 try:
-                    self._context = self._playwright.chromium.launch_persistent_context(
-                        user_data_dir=str(profile_path),
-                        headless=self.headless,
-                        locale="en-US",
-                    )
+                    self._context = self._playwright.chromium.launch_persistent_context(**persistent_kwargs)
                 except Exception as exc:  # pragma: no cover - depends on local browser install
                     launch_errors.append(f"chromium: {exc}")
                     self.close()
@@ -154,7 +154,10 @@ class PublicBrowserSession:
                     + " | ".join(launch_errors)
                 ) from exc
 
-        self._context = self._browser.new_context(locale="en-US")
+        self._context = self._browser.new_context(
+            locale="en-US",
+            user_agent=STANDARD_BROWSER_HEADERS["User-Agent"],
+        )
         self._page = self._context.new_page()
 
     def _settle(self) -> None:
@@ -232,7 +235,13 @@ class PublicBrowserSession:
         self._raise_if_challenge_text(body_text)
         self._warmed = True
 
-    def get_document(self, url: str) -> BrowserFetchResult:
+    def get_document(
+        self,
+        url: str,
+        *,
+        ready_text: str | None = None,
+        ready_timeout_ms: int = 0,
+    ) -> BrowserFetchResult:
         self._validate_url(url)
         self._launch()
         self._warm()
@@ -242,6 +251,18 @@ class PublicBrowserSession:
         except Exception as exc:
             raise BrowserFetchError(f"Browser navigation failed for {url}: {exc}") from exc
         self._settle()
+        if ready_text and ready_timeout_ms > 0:
+            try:
+                self._page.wait_for_function(
+                    """(needle) => {
+                        const body = document.body;
+                        return !!body && body.innerText.includes(needle);
+                    }""",
+                    arg=ready_text,
+                    timeout=ready_timeout_ms,
+                )
+            except Exception:
+                pass
         status = response.status if response is not None else 200
         if status == 429:
             raise BrowserBlockedError(f"Public-site browser request returned HTTP 429 for {url}.")
@@ -254,11 +275,25 @@ class PublicBrowserSession:
         if status >= 400:
             raise BrowserFetchError(f"Public-site browser request returned HTTP {status} for {url}.")
         body_text = self._body_text()
+        if ready_text and ready_text in body_text:
+            return BrowserFetchResult(
+                text=self._page.content(),
+                final_url=self._page.url,
+                status_code=status,
+                content_type="text/html",
+            )
         if CHALLENGE_RE.search(body_text) and self.blocked_retry_wait_ms:
             retried = self._reload_after_block_wait()
             if retried is not None and retried < 400:
                 status = retried
                 body_text = self._body_text()
+                if ready_text and ready_text in body_text:
+                    return BrowserFetchResult(
+                        text=self._page.content(),
+                        final_url=self._page.url,
+                        status_code=status,
+                        content_type="text/html",
+                    )
         self._raise_if_challenge_text(body_text)
         return BrowserFetchResult(
             text=self._page.content(),

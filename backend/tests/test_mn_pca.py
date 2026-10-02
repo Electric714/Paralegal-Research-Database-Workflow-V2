@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 import time
 from types import SimpleNamespace
@@ -11,15 +13,12 @@ from app.research.models import CompletenessStatus, IdentityStatus, SourceResult
 from app.research.sources.base import ContractorContext
 from app.research.sources.mn_pca import (
     CACHE_MAX_AGE_SECONDS,
-    CSV_EXPORT_URL,
-    DATA_VIEW_URL,
     LANDING_URL,
     MinnesotaPcaEnforcementSource,
     MpcaDatasetError,
     parse_mpca_csv,
 )
 from app.research.sources.mn_pca_reports import parse_report_page
-from app.research.sources.public_browser import BrowserBlockedError
 
 
 CSV = """Company or individual(s),Public date,Violation location,Violation description,Net penalty,Case type
@@ -60,6 +59,39 @@ def contractor(*, name: str = "Acme Construction, LLC", related: str = "") -> Co
     )
 
 
+def _report_html_from_csv(body: str) -> str | None:
+    if "company or individual" not in body.casefold() or "violation" not in body.casefold():
+        return None
+    rows = list(csv.DictReader(io.StringIO(body)))
+    if not rows:
+        return None
+    rendered: list[str] = []
+    for row in rows:
+        party = (row.get("Company or individual(s)") or row.get("Company or individual(s) (location)") or "").strip()
+        violation = (row.get("Violation description") or row.get("Violation(s)") or row.get("Violation") or "").strip()
+        if not party or not violation:
+            return None
+        rendered.append(
+            "<tr><td>{date}</td><td>{party}</td><td>{loc}</td><td>{viol}</td><td>{pen}</td><td>{case}</td></tr>".format(
+                date=row.get("Public date", ""),
+                party=party,
+                loc=row.get("Violation location", ""),
+                viol=violation,
+                pen=row.get("Net penalty", ""),
+                case=row.get("Case type", ""),
+            )
+        )
+    count = len(rendered)
+    return (
+        "<html><body>"
+        f"<h1>MPCA completed {count} enforcement cases in first half of 2026</h1>"
+        "<table><tr><th>Public date</th><th>Company or individual(s)</th><th>Violation location</th>"
+        "<th>Violation description</th><th>Net penalty</th><th>Case type</th></tr>"
+        + "".join(rendered)
+        + "</table></body></html>"
+    )
+
+
 def direct_source(
     *,
     csv_body: str = CSV,
@@ -74,27 +106,37 @@ def direct_source(
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested.append(str(request.url))
-        if request.url.host == "services.pca.state.mn.us":
-            raise AssertionError("MPCA adapter must not use the REST API")
-        if str(request.url) == LANDING_URL:
-            return httpx.Response(200, text="<html>MPCA compliance and enforcement</html>", request=request)
-        if str(request.url) == DATA_VIEW_URL:
-            return httpx.Response(200, text="<html>Tableau enforcement workbook</html>", request=request)
-        if str(request.url) == CSV_EXPORT_URL:
+        if request.url.host == "services.pca.state.mn.us" or "data.pca.state.mn.us" in str(request.url):
+            raise AssertionError("MPCA adapter must not use Tableau or the REST API")
+        if str(request.url) != REPORT_URL:
+            raise AssertionError(f"unexpected URL: {request.url}")
+        if csv_status != 200:
+            return httpx.Response(csv_status, text=csv_body, request=request)
+        html = _report_html_from_csv(csv_body)
+        if html is None:
             return httpx.Response(
-                csv_status,
+                200,
                 text=csv_body,
                 headers={"content-type": csv_content_type},
                 request=request,
             )
-        raise AssertionError(f"unexpected URL: {request.url}")
+        return httpx.Response(
+            200,
+            text=html,
+            headers={"content-type": "text/html; charset=utf-8"},
+            request=request,
+        )
 
     source = MinnesotaPcaEnforcementSource(
         client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
         min_expected_records=min_expected_records,
         allow_browser_fallback=False,
         allow_cached_fallback=allow_cached_fallback,
-        allow_report_fallback=allow_report_fallback,
+        allow_report_fallback=True,
+        include_pdfs=False,
+        report_urls=(REPORT_URL,),
+        discover_report_urls=False,
+        report_min_records=1,
         cache_path=cache_path,
     )
     return source, requested
@@ -153,6 +195,8 @@ def report_fallback_source() -> tuple[MinnesotaPcaEnforcementSource, list[str]]:
         allow_browser_fallback=False,
         allow_cached_fallback=False,
         allow_report_fallback=True,
+        include_pdfs=True,
+        min_expected_records=1,
         report_urls=(REPORT_URL,),
         discover_report_urls=False,
         report_min_records=1,
@@ -198,20 +242,20 @@ def test_report_page_parser_reads_table_and_low_penalty_bullets():
     assert records[1]["Net penalty"] == "$1,200"
 
 
-def test_default_path_uses_tableau_and_never_rest_api():
+def test_default_path_uses_official_mpca_documents_and_never_tableau():
     source, requested = direct_source()
     result = source.search(contractor())
 
     assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
-    assert result.acquisition_method == "official_tableau_direct_csv"
+    assert result.acquisition_method == "official_mpca_html_and_pdf"
     assert result.normalized_payload["rest_api_used"] is False
-    assert LANDING_URL in requested
-    assert DATA_VIEW_URL in requested
-    assert CSV_EXPORT_URL in requested
+    assert result.normalized_payload["dataset_partial_scope"] is False
+    assert REPORT_URL in requested
+    assert all("data.pca.state.mn.us" not in url for url in requested)
     assert all("services.pca.state.mn.us" not in url for url in requested)
 
 
-def test_direct_tableau_clean_no_match_is_safe_research_negative_only():
+def test_count_validated_official_page_can_be_clean_no_match():
     source, _ = direct_source()
     result = source.search(contractor(name="No Such Contractor LLC"))
 
@@ -222,87 +266,38 @@ def test_direct_tableau_clean_no_match_is_safe_research_negative_only():
     assert "never propose" in result.normalized_payload["negative_semantics"]
 
 
-def test_captcha_on_direct_export_uses_browser_context_tableau_export():
+def test_captcha_on_official_page_cannot_become_negative():
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) in {LANDING_URL, DATA_VIEW_URL}:
-            return httpx.Response(200, text="<html>ok</html>", request=request)
-        if str(request.url) == CSV_EXPORT_URL:
-            return httpx.Response(
-                200,
-                text=CAPTCHA_HTML,
-                headers={"content-type": "text/html"},
-                request=request,
-            )
-        raise AssertionError(f"unexpected URL: {request.url}")
-
-    sessions: list[FakeBrowserSession] = []
-
-    def browser_factory(**kwargs):
-        session = FakeBrowserSession(csv_text=CSV, **kwargs)
-        sessions.append(session)
-        return session
+        assert str(request.url) == REPORT_URL
+        return httpx.Response(
+            200,
+            text=CAPTCHA_HTML,
+            headers={"content-type": "text/html"},
+            request=request,
+        )
 
     source = MinnesotaPcaEnforcementSource(
         client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
-        browser_session_factory=browser_factory,
         min_expected_records=1,
+        allow_browser_fallback=False,
         allow_cached_fallback=False,
-        allow_report_fallback=False,
+        include_pdfs=False,
+        report_urls=(REPORT_URL,),
+        discover_report_urls=False,
+        report_min_records=1,
     )
-    result = source.search(contractor())
+    result = source.search(contractor(name="No Such Contractor LLC"))
 
-    assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
-    assert result.acquisition_method == "official_tableau_headless_browser_csv"
-    assert sessions[0].document_urls == [DATA_VIEW_URL]
-    assert sessions[0].resource_urls == [CSV_EXPORT_URL]
-    assert result.normalized_payload["rest_api_used"] is False
-
-
-def test_headless_browser_block_then_persistent_system_browser_succeeds():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) in {LANDING_URL, DATA_VIEW_URL}:
-            return httpx.Response(200, text="<html>ok</html>", request=request)
-        if str(request.url) == CSV_EXPORT_URL:
-            return httpx.Response(
-                200,
-                text=CAPTCHA_HTML,
-                headers={"content-type": "text/html"},
-                request=request,
-            )
-        raise AssertionError(f"unexpected URL: {request.url}")
-
-    factory_calls: list[dict] = []
-
-    def browser_factory(**kwargs):
-        factory_calls.append(kwargs)
-        return FakeBrowserSession(csv_text=CSV, blocked=len(factory_calls) == 1, **kwargs)
-
-    source = MinnesotaPcaEnforcementSource(
-        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True),
-        browser_session_factory=browser_factory,
-        browser_profile_dir="test-profile",
-        min_expected_records=1,
-        allow_cached_fallback=False,
-        allow_report_fallback=False,
-    )
-    result = source.search(contractor())
-
-    assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
-    assert result.acquisition_method == "official_tableau_persistent_browser_csv"
-    assert len(factory_calls) == 2
-    assert factory_calls[0]["headless"] is True
-    assert factory_calls[0]["profile_dir"] is None
-    assert factory_calls[1]["headless"] is False
-    assert factory_calls[1]["profile_dir"] == "test-profile"
-
-
-def test_tableau_captcha_falls_through_to_official_mpca_report_pages():
+    assert result.status == SourceResultStatus.BLOCKED
+    assert result.completeness_status == CompletenessStatus.UNKNOWN
+    assert result.is_clean_negative is False
+    assert all("data.pca.state.mn.us" not in warning for warning in result.warnings)
     source, requested = report_fallback_source()
     result = source.search(contractor())
 
     assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
     assert result.completeness_status == CompletenessStatus.PARTIAL
-    assert result.acquisition_method == "official_mpca_enforcement_report_pages"
+    assert result.acquisition_method == "official_mpca_html_and_pdf"
     assert result.evidence[0].observed_value == "Y"
     assert result.evidence[0].source_url == REPORT_URL
     assert result.normalized_payload["dataset_partial_scope"] is True
@@ -376,7 +371,7 @@ def test_html_instead_of_csv_cannot_become_negative():
     source, _ = direct_source(csv_body="<!doctype html><html>not csv</html>", csv_content_type="text/html")
     result = source.search(contractor(name="No Such Contractor LLC"))
 
-    assert result.status == SourceResultStatus.PARSER_FAILURE
+    assert result.status == SourceResultStatus.DATASET_MALFORMED
     assert result.completeness_status == CompletenessStatus.UNKNOWN
     assert result.is_clean_negative is False
 
@@ -413,7 +408,7 @@ def test_recent_validated_cache_can_surface_finding_but_is_partial(tmp_path):
 
     assert result.status == SourceResultStatus.SUCCESS_WITH_FINDINGS
     assert result.completeness_status == CompletenessStatus.PARTIAL
-    assert result.acquisition_method == "validated_recent_tableau_cache"
+    assert result.acquisition_method == "validated_recent_official_cache"
     assert result.evidence[0].observed_value == "Y"
     assert result.normalized_payload["dataset_cached"] is True
 
